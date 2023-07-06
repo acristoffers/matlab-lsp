@@ -32,35 +32,35 @@ fn main() -> Result<(), Error> {
     let bash_path = generate_to(
         shells::Bash,
         &mut cmd,            // We need to specify what generator to use
-        "matlab-beautifier", // We need to specify the bin name manually
+        "matlab-lsp", // We need to specify the bin name manually
         outdir.clone(),      // We need to specify where to write to
     )?;
 
     let fish_path = generate_to(
         shells::Fish,
         &mut cmd,            // We need to specify what generator to use
-        "matlab-beautifier", // We need to specify the bin name manually
+        "matlab-lsp", // We need to specify the bin name manually
         outdir.clone(),      // We need to specify where to write to
     )?;
 
     let zsh_path = generate_to(
         shells::Zsh,
         &mut cmd,            // We need to specify what generator to use
-        "matlab-beautifier", // We need to specify the bin name manually
+        "matlab-lsp", // We need to specify the bin name manually
         outdir.clone(),      // We need to specify where to write to
     )?;
 
     let ps_path = generate_to(
         shells::PowerShell,
         &mut cmd,            // We need to specify what generator to use
-        "matlab-beautifier", // We need to specify the bin name manually
+        "matlab-lsp", // We need to specify the bin name manually
         outdir.clone(),      // We need to specify where to write to
     )?;
 
     let elvish_path = generate_to(
         shells::Elvish,
         &mut cmd,            // We need to specify what generator to use
-        "matlab-beautifier", // We need to specify the bin name manually
+        "matlab-lsp", // We need to specify the bin name manually
         outdir.clone(),      // We need to specify where to write to
     )?;
 
@@ -70,7 +70,7 @@ fn main() -> Result<(), Error> {
         .join("man")
         .join("man1");
     std::fs::create_dir_all(&man_path)?;
-    let man_path = man_path.join("matlab-beautifier.1");
+    let man_path = man_path.join("matlab-lsp.1");
     let mut buffer: Vec<u8> = Default::default();
     man.render(&mut buffer)?;
     std::fs::write(man_path.clone(), buffer)?;
