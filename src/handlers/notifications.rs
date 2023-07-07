@@ -7,12 +7,12 @@
 use std::sync::Arc;
 
 use crate::parsed_file::ParsedFile;
-use crate::utils::{lock_mutex, SessionStateArc};
+use crate::utils::{lock_mutex, range_to_bytes, SessionStateArc};
 
 use anyhow::{anyhow, Result};
 use lsp_server::{ExtractError, Notification};
-use lsp_types::notification::DidOpenTextDocument;
-use lsp_types::DidOpenTextDocumentParams;
+use lsp_types::notification::{DidChangeTextDocument, DidOpenTextDocument};
+use lsp_types::{DidChangeTextDocumentParams, DidOpenTextDocumentParams};
 
 struct Dispatcher<'a> {
     state: SessionStateArc,
@@ -60,11 +60,15 @@ where
 pub fn handle_notification(state: SessionStateArc, notification: &Notification) -> Result<bool> {
     let mut dispatcher = Dispatcher::new(Arc::clone(&state), notification);
     dispatcher
-        .handle::<DidOpenTextDocument>(handle_did_open)
+        .handle::<DidOpenTextDocument>(handle_text_document_did_open)
+        .handle::<DidChangeTextDocument>(handle_text_document_did_change)
         .finish()
 }
 
-fn handle_did_open(state: SessionStateArc, params: DidOpenTextDocumentParams) -> Result<bool> {
+fn handle_text_document_did_open(
+    state: SessionStateArc,
+    params: DidOpenTextDocumentParams,
+) -> Result<bool> {
     let mut parsed_code = ParsedFile {
         file: params.text_document.uri,
         contents: params.text_document.text,
@@ -74,5 +78,36 @@ fn handle_did_open(state: SessionStateArc, params: DidOpenTextDocumentParams) ->
     lock_mutex(&state)?
         .files
         .insert(parsed_code.file.as_str().into(), parsed_code);
+    Ok(false)
+}
+
+fn handle_text_document_did_change(
+    state: SessionStateArc,
+    params: DidChangeTextDocumentParams,
+) -> Result<bool> {
+    let file_name = params.text_document.uri.as_str().to_string();
+    let mut state = lock_mutex(&state)?;
+    let parsed_file = state
+        .files
+        .get_mut(&file_name)
+        .ok_or(anyhow!("No such file: {file_name}"))?;
+    for change in params.content_changes {
+        match change.range {
+            Some(range) => {
+                let (start, mut end) = range_to_bytes(range, parsed_file)?;
+                end = end.min(parsed_file.contents.len() - 1);
+                if start == end {
+                    parsed_file.contents.insert_str(start, change.text.as_str());
+                } else {
+                    eprintln!("Replacing from {start} to {end} with {}", change.text);
+                    parsed_file
+                        .contents
+                        .replace_range(start..end, change.text.as_str());
+                }
+                parsed_file.parse()?;
+            }
+            None => parsed_file.contents = change.text,
+        }
+    }
     Ok(false)
 }

@@ -39,9 +39,7 @@ impl ParsedFile {
         } else {
             return None;
         }
-        self.contents = format((self.contents.clone() + "\n").as_str()).ok()?;
-        self.parse().expect("Parses formatted code.");
-        Some(self.contents.clone())
+        format((self.contents.clone() + "\n").as_str()).ok()
     }
 
     pub fn parse_file(path: String) -> Result<ParsedFile> {

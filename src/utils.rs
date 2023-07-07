@@ -6,17 +6,65 @@
 
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use anyhow::{anyhow, Result};
-
+use crate::parsed_file::ParsedFile;
 use crate::session_state::SessionState;
+
+use anyhow::{anyhow, Result};
+use lsp_types::Range;
+use tree_sitter::Point;
 
 pub type SessionStateArc = Arc<Mutex<&'static mut SessionState>>;
 
+/// Transforms a Range into bytes
+pub(crate) fn range_to_bytes(range: Range, parsed_file: &ParsedFile) -> Result<(usize, usize)> {
+    let start = Point::new(
+        range.start.line.try_into()?,
+        range.start.character.try_into()?,
+    );
+    let end = Point::new(range.end.line.try_into()?, range.end.character.try_into()?);
+    let mut byte = 0;
+    let mut row = 0;
+    let mut col = 0;
+    let mut start_byte = 0;
+    let mut end_byte = 0;
+    let mut chars = parsed_file.contents.chars();
+    if let Some(tree) = &parsed_file.tree {
+        if let Some(node) = tree.root_node().descendant_for_point_range(start, end) {
+            byte = node.start_byte();
+            row = node.start_position().row;
+            col = node.start_position().column;
+            chars = parsed_file.contents[byte..].chars();
+        }
+    }
+    loop {
+        if row == start.row && col == start.column {
+            start_byte = byte;
+        }
+        if row == end.row && col == end.column {
+            end_byte = byte;
+            break;
+        }
+        if let Some(c) = chars.next() {
+            byte += c.len_utf8();
+            col += 1;
+            if c == '\n' {
+                row += 1;
+                col = 0;
+            }
+        } else {
+            break;
+        }
+    }
+    Ok((start_byte, end_byte))
+}
+
+/// Locks a mutex, and adds an error message in case of error.
 pub(crate) fn lock_mutex<T>(arc: &Arc<Mutex<T>>) -> Result<MutexGuard<'_, T>> {
     arc.lock().map_err(|_| anyhow!("Could not lock mutex."))
 }
 
-/// Taken from helix-editor
+// The functions below were taken from the helix editor
+
 /// Reads the first chunk from a Reader into the given buffer
 /// and detects the encoding.
 ///
@@ -53,7 +101,6 @@ fn read_and_detect_encoding<R: std::io::Read + ?Sized>(
     Ok((encoding, has_bom, decoder, read))
 }
 
-/// Taken from helix-editor
 pub(crate) fn read_to_string<R: std::io::Read + ?Sized>(
     reader: &mut R,
     encoding: Option<&'static encoding_rs::Encoding>,

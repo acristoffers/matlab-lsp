@@ -101,7 +101,7 @@ fn handle_formatting(
 
 fn handle_shutdown(state: SessionStateArc, id: RequestId, _params: ()) -> Result<bool> {
     let state = lock_mutex(&state)?;
-    let resp = Response::new_ok(id.clone(), ());
+    let resp = Response::new_ok(id, ());
     let _ = state.sender.send(resp.into());
     Ok(true)
 }
