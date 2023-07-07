@@ -15,6 +15,5 @@ pub fn format(code: &str) -> Result<String> {
         sparse_add: true,
         inplace: true,
     };
-    eprintln!("Calling formatter with code {code}");
     beautify(code, &mut arguments)
 }

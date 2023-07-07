@@ -10,13 +10,13 @@ use anyhow::{anyhow, Context, Result};
 use lsp_types::Url;
 use tree_sitter::Tree;
 
-pub struct ParsedCode {
+pub struct ParsedFile {
     pub file: Url,
     pub contents: String,
     pub tree: Option<Tree>,
 }
 
-impl ParsedCode {
+impl ParsedFile {
     pub fn parse(&mut self) -> Result<()> {
         self.contents = read_to_string(&mut self.contents.as_bytes(), None)?.0;
         let mut parser = tree_sitter::Parser::new();
@@ -27,7 +27,7 @@ impl ParsedCode {
             .parse(&self.contents, None)
             .ok_or_else(|| anyhow!("Could not parse file."))?;
         self.tree = Some(tree);
-        eprintln!("Code parsed!!!");
+        eprintln!("Parsed {}", self.file.as_str());
         Ok(())
     }
 
@@ -42,5 +42,18 @@ impl ParsedCode {
         self.contents = format((self.contents.clone() + "\n").as_str()).ok()?;
         self.parse().expect("Parses formatted code.");
         Some(self.contents.clone())
+    }
+
+    pub fn parse_file(path: String) -> Result<ParsedFile> {
+        let file_uri = "file://".to_string() + path.as_str();
+        let mut file = std::fs::File::open(path)?;
+        let code = read_to_string(&mut file, None)?.0 + "\n";
+        let mut parsed_file = ParsedFile {
+            contents: code,
+            file: Url::parse(file_uri.as_str())?,
+            tree: None,
+        };
+        parsed_file.parse()?;
+        Ok(parsed_file)
     }
 }

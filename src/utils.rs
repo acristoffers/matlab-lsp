@@ -4,15 +4,16 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-use anyhow::Result;
-use lsp_server::{ExtractError, Request, RequestId};
+use std::sync::{Arc, Mutex, MutexGuard};
 
-pub(crate) fn cast<R>(req: Request) -> Result<(RequestId, R::Params), ExtractError<Request>>
-where
-    R: lsp_types::request::Request,
-    R::Params: serde::de::DeserializeOwned,
-{
-    req.extract(R::METHOD)
+use anyhow::{anyhow, Result};
+
+use crate::session_state::SessionState;
+
+pub type SessionStateArc = Arc<Mutex<&'static mut SessionState>>;
+
+pub(crate) fn lock_mutex<T>(arc: &Arc<Mutex<T>>) -> Result<MutexGuard<'_, T>> {
+    arc.lock().map_err(|_| anyhow!("Could not lock mutex."))
 }
 
 /// Taken from helix-editor

@@ -4,13 +4,8 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-use std::collections::HashMap;
+mod notifications;
+mod requests;
 
-use lsp_types::InitializeParams;
-
-use crate::parsed_code::ParsedCode;
-
-pub struct GlobalState {
-    pub files: HashMap<String, ParsedCode>,
-    pub workspace: InitializeParams,
-}
+pub use notifications::handle_notification;
+pub use requests::handle_request;
