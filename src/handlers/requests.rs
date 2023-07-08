@@ -79,8 +79,8 @@ where
 pub fn handle_request(state: SessionStateArc, request: &Request) -> Result<Option<ExitCode>> {
     let mut dispatcher = Dispatcher::new(state, request);
     dispatcher
-        .handle::<Shutdown>(handle_shutdown)
         .handle::<Formatting>(handle_formatting)
+        .handle::<Shutdown>(handle_shutdown)
         .finish()
 }
 
