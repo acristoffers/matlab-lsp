@@ -4,6 +4,7 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
+use std::path::Path;
 use std::process::ExitCode;
 use std::sync::Arc;
 
@@ -90,12 +91,27 @@ fn handle_text_document_did_open(
         params.text_document.uri.as_str()
     );
     let contents = read_to_string(&mut params.text_document.text.as_bytes(), None)?.0;
+    let path = params.text_document.uri.path().to_string();
+    let path_p = Path::new(&path);
+    let mut scope = String::new();
+    for segment in path_p.iter() {
+        let segment = segment.to_string_lossy().to_string();
+        if segment.starts_with('+') || segment.starts_with('@') {
+            if !scope.is_empty() {
+                scope += "/";
+            }
+            scope += segment.as_str();
+        }
+    }
     let mut parsed_code = ParsedFile {
         file: params.text_document.uri,
         contents,
         tree: None,
         open: true,
         file_type: FileType::MScript,
+        in_classfolder: path.contains('@'),
+        in_namespace: path.contains('+'),
+        scope,
     };
     parsed_code.parse()?;
     lock_mutex(&state)?

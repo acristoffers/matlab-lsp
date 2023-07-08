@@ -91,7 +91,9 @@ fn start_server(arguments: Arguments) -> Result<ExitCode> {
     let initialization_params = connection.initialize(server_capabilities)?;
 
     let session_state = SessionState {
+        classes: HashMap::new(),
         files: HashMap::new(),
+        namespaces: HashMap::new(),
         workspace: serde_json::from_value(initialization_params)?,
         sender: connection.sender,
         path: if let Some(path) = arguments.path {
