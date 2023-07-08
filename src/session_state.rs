@@ -10,6 +10,7 @@ use std::thread::{spawn, JoinHandle};
 
 use anyhow::Result;
 use crossbeam_channel::Sender;
+use log::info;
 use lsp_server::Message;
 use lsp_types::InitializeParams;
 
@@ -27,10 +28,14 @@ pub struct SessionState {
 
     // Extra folders to analyze
     pub path: Vec<String>,
+
+    // Whether the client requested a shutdown
+    pub client_requested_shutdown: bool,
 }
 
 impl SessionState {
     pub fn parse_path_async(arc: SessionStateArc) -> Result<Vec<JoinHandle<Result<()>>>> {
+        info!("Scanning workspace and path");
         let mut paths = lock_mutex(&arc)?.path.clone();
         if let Some(uri) = &lock_mutex(&arc)?.workspace.root_uri {
             if let Some(path) = uri.as_str().strip_prefix("file://") {
@@ -46,6 +51,7 @@ impl SessionState {
         }
         let mut handles = vec![];
         for path in paths {
+            info!("Launching thread to scan {path}");
             let state = Arc::clone(&arc);
             let handle = spawn(move || -> Result<()> {
                 let dir = std::fs::read_dir(path)?;

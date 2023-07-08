@@ -7,6 +7,7 @@
 use crate::formatter::format;
 use crate::utils::read_to_string;
 use anyhow::{anyhow, Context, Result};
+use log::info;
 use lsp_types::Url;
 use tree_sitter::Tree;
 
@@ -14,10 +15,12 @@ pub struct ParsedFile {
     pub file: Url,
     pub contents: String,
     pub tree: Option<Tree>,
+    pub open: bool,
 }
 
 impl ParsedFile {
     pub fn parse(&mut self) -> Result<()> {
+        info!("Parsing {}", self.file.as_str());
         self.contents = read_to_string(&mut self.contents.as_bytes(), None)?.0;
         let mut parser = tree_sitter::Parser::new();
         parser
@@ -43,6 +46,7 @@ impl ParsedFile {
     }
 
     pub fn parse_file(path: String) -> Result<ParsedFile> {
+        info!("Reading file from path {}", path);
         let file_uri = "file://".to_string() + path.as_str();
         let mut file = std::fs::File::open(path)?;
         let code = read_to_string(&mut file, None)?.0 + "\n";
@@ -50,6 +54,7 @@ impl ParsedFile {
             contents: code,
             file: Url::parse(file_uri.as_str())?,
             tree: None,
+            open: false,
         };
         parsed_file.parse()?;
         Ok(parsed_file)

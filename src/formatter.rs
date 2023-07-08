@@ -5,6 +5,7 @@
  */
 
 use anyhow::Result;
+use log::debug;
 use matlab_beautifier::beautify;
 use matlab_beautifier::Arguments;
 
@@ -15,5 +16,6 @@ pub fn format(code: &str) -> Result<String> {
         sparse_add: true,
         inplace: true,
     };
+    debug!("Calling beautifier code.");
     beautify(code, &mut arguments)
 }

@@ -4,11 +4,13 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
+use std::process::ExitCode;
 use std::sync::Arc;
 
 use crate::utils::{lock_mutex, SessionStateArc};
 
 use anyhow::{anyhow, Context, Result};
+use log::info;
 use lsp_server::{ExtractError, Message, Request, RequestId, Response};
 use lsp_types::request::{Formatting, Shutdown};
 use lsp_types::{DocumentFormattingParams, Position, TextEdit};
@@ -16,7 +18,7 @@ use lsp_types::{DocumentFormattingParams, Position, TextEdit};
 struct Dispatcher<'a> {
     state: SessionStateArc,
     request: &'a Request,
-    result: Option<Result<bool>>,
+    result: Option<Result<Option<ExitCode>>>,
 }
 
 impl Dispatcher<'_> {
@@ -30,24 +32,39 @@ impl Dispatcher<'_> {
 
     fn handle<R>(
         &mut self,
-        function: fn(SessionStateArc, RequestId, R::Params) -> Result<bool>,
+        function: fn(SessionStateArc, RequestId, R::Params) -> Result<Option<ExitCode>>,
     ) -> &mut Self
     where
         R: lsp_types::request::Request,
         R::Params: serde::de::DeserializeOwned,
     {
+        let state = lock_mutex(&self.state).unwrap();
+        if state.client_requested_shutdown {
+            self.result = Some(Err(anyhow!("Got a request after a shutdown.")));
+            let resp = Response::new_err(
+                self.request.id.clone(),
+                lsp_server::ErrorCode::InvalidRequest as i32,
+                "Shutdown already requested.".to_owned(),
+            );
+            state.sender.send(Message::Response(resp)).unwrap();
+            drop(state);
+            return self;
+        }
+        drop(state);
         let result = match cast::<R>(self.request.clone()) {
-            Ok((id, params)) => Some(function(Arc::clone(&self.state), id, params)),
-            Err(err @ ExtractError::JsonError { .. }) => Some(Err(anyhow!("JsonError: {err:?}"))),
-            Err(ExtractError::MethodMismatch(req)) => Some(Err(anyhow!("MethodMismatch: {req:?}"))),
+            Ok((id, params)) => function(Arc::clone(&self.state), id, params),
+            Err(err @ ExtractError::JsonError { .. }) => Err(anyhow!("JsonError: {err:?}")),
+            Err(ExtractError::MethodMismatch(req)) => Err(anyhow!("MethodMismatch: {req:?}")),
         };
-        self.result = result;
+        if result.is_ok() || self.result.is_none() {
+            self.result = Some(result);
+        }
         self
     }
 
-    fn finish(&mut self) -> Result<bool> {
+    fn finish(&mut self) -> Result<Option<ExitCode>> {
         let result = self.result.take();
-        result.map_or_else(|| Ok(false), |x| x)
+        result.map_or_else(|| Ok(None), |x| x)
     }
 }
 
@@ -59,7 +76,7 @@ where
     req.extract(R::METHOD)
 }
 
-pub fn handle_request(state: SessionStateArc, request: &Request) -> Result<bool> {
+pub fn handle_request(state: SessionStateArc, request: &Request) -> Result<Option<ExitCode>> {
     let mut dispatcher = Dispatcher::new(state, request);
     dispatcher
         .handle::<Shutdown>(handle_shutdown)
@@ -71,7 +88,8 @@ fn handle_formatting(
     state: SessionStateArc,
     id: RequestId,
     params: DocumentFormattingParams,
-) -> Result<bool> {
+) -> Result<Option<ExitCode>> {
+    info!("Formatting {}", params.text_document.uri.as_str());
     let mut state = lock_mutex(&state)?;
     let file = state
         .files
@@ -96,12 +114,14 @@ fn handle_formatting(
     } else {
         return Err(anyhow!("Error formatting"));
     }
-    Ok(false)
+    Ok(None)
 }
 
-fn handle_shutdown(state: SessionStateArc, id: RequestId, _params: ()) -> Result<bool> {
-    let state = lock_mutex(&state)?;
+fn handle_shutdown(state: SessionStateArc, id: RequestId, _params: ()) -> Result<Option<ExitCode>> {
+    info!("Received shutdown request.");
+    let mut state = lock_mutex(&state)?;
+    state.client_requested_shutdown = true;
     let resp = Response::new_ok(id, ());
     let _ = state.sender.send(resp.into());
-    Ok(true)
+    Ok(None)
 }
