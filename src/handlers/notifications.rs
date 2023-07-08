@@ -44,11 +44,13 @@ impl Dispatcher<'_> {
         N::Params: serde::de::DeserializeOwned,
     {
         let result = match cast::<N>(self.notification.clone()) {
-            Ok(params) => Some(function(Arc::clone(&self.state), params)),
-            Err(err @ ExtractError::JsonError { .. }) => Some(Err(anyhow!("JsonError: {err:?}"))),
-            Err(ExtractError::MethodMismatch(req)) => Some(Err(anyhow!("MethodMismatch: {req:?}"))),
+            Ok(params) => function(Arc::clone(&self.state), params),
+            Err(err @ ExtractError::JsonError { .. }) => Err(anyhow!("JsonError: {err:?}")),
+            Err(ExtractError::MethodMismatch(req)) => Err(anyhow!("MethodMismatch: {req:?}")),
         };
-        self.result = result;
+        if result.is_ok() || self.result.is_none() {
+            self.result = Some(result);
+        }
         self
     }
 
