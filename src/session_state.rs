@@ -18,19 +18,14 @@ use crate::parsed_file::ParsedFile;
 use crate::utils::{lock_mutex, SessionStateArc};
 
 pub struct SessionState {
-    // Workspace and editor parsed files
-    pub files: HashMap<String, ParsedFile>,
-
+    // Misc
+    pub client_requested_shutdown: bool,
+    pub path: Vec<String>,
+    pub sender: Sender<Message>,
     pub workspace: InitializeParams,
 
-    // Server connection
-    pub sender: Sender<Message>,
-
-    // Extra folders to analyze
-    pub path: Vec<String>,
-
-    // Whether the client requested a shutdown
-    pub client_requested_shutdown: bool,
+    // Code states and structures
+    pub files: HashMap<String, ParsedFile>,
 }
 
 impl SessionState {

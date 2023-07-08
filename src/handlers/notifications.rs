@@ -7,8 +7,8 @@
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use crate::parsed_file::ParsedFile;
-use crate::utils::{lock_mutex, range_to_bytes, SessionStateArc};
+use crate::parsed_file::{FileType, ParsedFile};
+use crate::utils::{lock_mutex, range_to_bytes, read_to_string, SessionStateArc};
 
 use anyhow::{anyhow, Result};
 use log::{debug, info};
@@ -89,11 +89,13 @@ fn handle_text_document_did_open(
         "documentText/didOpen: {}",
         params.text_document.uri.as_str()
     );
+    let contents = read_to_string(&mut params.text_document.text.as_bytes(), None)?.0;
     let mut parsed_code = ParsedFile {
         file: params.text_document.uri,
-        contents: params.text_document.text,
+        contents,
         tree: None,
         open: true,
+        file_type: FileType::MScript,
     };
     parsed_code.parse()?;
     lock_mutex(&state)?
@@ -110,8 +112,8 @@ fn handle_text_document_did_close(
         "documentText/didClose: {}",
         params.text_document.uri.as_str()
     );
-    if params.text_document.uri.scheme() == "file" {
-        let path = params.text_document.uri.path();
+    let path = params.text_document.uri.path();
+    if params.text_document.uri.scheme() == "file" && std::path::Path::new(path).exists() {
         let parsed_file = ParsedFile::parse_file(path.into())?;
         lock_mutex(&state)?
             .files
