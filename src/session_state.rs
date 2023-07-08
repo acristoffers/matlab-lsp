@@ -61,6 +61,12 @@ impl SessionState {
                 {
                     if entry.metadata()?.is_file() {
                         let path = entry.path().to_string_lossy().to_string();
+                        let url = String::from("file://") + path.as_str();
+                        let lock = lock_mutex(&state)?;
+                        if lock.files.contains_key(&url) {
+                            continue;
+                        }
+                        drop(lock);
                         let parsed_file = ParsedFile::parse_file(path)?;
                         lock_mutex(&state)?
                             .files
