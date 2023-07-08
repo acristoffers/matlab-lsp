@@ -55,7 +55,10 @@ impl SessionState {
             let state = Arc::clone(&arc);
             let handle = spawn(move || -> Result<()> {
                 let dir = std::fs::read_dir(path)?;
-                for entry in dir.flatten() {
+                for entry in dir
+                    .flatten()
+                    .filter(|e| e.file_name().to_string_lossy().ends_with(".m"))
+                {
                     if entry.metadata()?.is_file() {
                         let path = entry.path().to_string_lossy().to_string();
                         let parsed_file = ParsedFile::parse_file(path)?;
