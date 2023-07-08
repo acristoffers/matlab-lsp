@@ -113,17 +113,13 @@ fn handle_text_document_did_close(
     if params.text_document.uri.scheme() == "file" {
         let path = params.text_document.uri.path();
         let parsed_file = ParsedFile::parse_file(path.into())?;
-        let mut state = lock_mutex(&state)?;
-        if let Some(file) = state.files.get_mut(path) {
-            *file = parsed_file;
-        } else {
-            state
-                .files
-                .insert(parsed_file.file.as_str().into(), parsed_file);
-        }
+        lock_mutex(&state)?
+            .files
+            .insert(parsed_file.file.as_str().into(), parsed_file);
     } else {
-        let mut state = lock_mutex(&state)?;
-        state.files.remove(params.text_document.uri.as_str());
+        lock_mutex(&state)?
+            .files
+            .remove(params.text_document.uri.as_str());
     }
     Ok(None)
 }
