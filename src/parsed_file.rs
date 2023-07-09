@@ -8,53 +8,12 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use crate::formatter::format;
+pub use crate::types::{FileType, FileTypeFunction, ParsedFile};
 use crate::utils::read_to_string;
 use anyhow::{anyhow, Context, Result};
 use log::{error, info};
 use lsp_types::Url;
-use tree_sitter::{Node, Tree};
-
-#[derive(Debug)]
-pub struct FileTypeFunction {
-    name: String,
-    argin: usize,
-    argout: usize,
-    vargin: bool,
-    vargout: bool,
-    argout_names: Vec<String>,
-    argin_names: Vec<String>,
-    vargin_names: Vec<String>,
-}
-
-#[derive(Debug)]
-pub enum FileType {
-    Function(FileTypeFunction),
-    Class(String),
-    MScript,
-}
-
-#[derive(Debug)]
-pub struct ParsedFile {
-    /// The file contents as a string. If the file is not open, this will be kept empty unless it
-    /// is being operated on.
-    pub contents: String,
-    /// The file URI. Kept as this so the editor can send whatever. However, most functionality of
-    /// this server requires a file:// protocol.
-    pub file: Url,
-    /// Is this a script, function or class?.
-    pub file_type: FileType,
-    /// Whether this file is inside a @folder.
-    pub in_classfolder: bool,
-    /// Whether this file is inside a +folder.
-    pub in_namespace: bool,
-    /// Whether the file is currently open in the editor.
-    pub open: bool,
-    /// The scope of this file, when it is inside namespaces/class folders.
-    /// For example: +lib or +lib/+cvx or @myclass
-    pub scope: String,
-    /// The file's parsed tree.
-    pub tree: Option<Tree>,
-}
+use tree_sitter::Node;
 
 impl ParsedFile {
     pub fn parse(&mut self) -> Result<()> {

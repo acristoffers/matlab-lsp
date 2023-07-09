@@ -9,52 +9,11 @@ use std::sync::Arc;
 use std::thread::{spawn, JoinHandle};
 
 use anyhow::Result;
-use crossbeam_channel::Sender;
 use log::info;
-use lsp_server::Message;
-use lsp_types::InitializeParams;
 
 use crate::parsed_file::ParsedFile;
+pub use crate::types::{ClassFolder, Namespace, SessionState};
 use crate::utils::{lock_mutex, SessionStateArc};
-
-#[derive(Debug)]
-pub struct SessionState {
-    // Misc
-    /// Whether the client requested us to shutdown.
-    pub client_requested_shutdown: bool,
-    /// The path given by the user through command line or env var.
-    pub path: Vec<String>,
-    /// Channel used to send messages to the client.
-    pub sender: Sender<Message>,
-    /// The workspace parameters sent by the client.
-    pub workspace: InitializeParams,
-
-    // Code states and structures
-    /// A list of all files in the workspace+path, even the ones inside namespaces.
-    pub files: HashMap<String, ParsedFile>,
-    /// A hashmap with all first-level namespaces. Every namespace may contain nested namespaces
-    /// and classes.
-    pub namespaces: HashMap<String, Namespace>,
-    /// A hashmap with all first-level class folders. Every class folder may contain nested
-    /// namespaces and classes.
-    pub classes: HashMap<String, ClassFolder>,
-}
-
-#[derive(Debug)]
-pub struct Namespace {
-    name: String,
-    files: Vec<String>,
-    namespaces: HashMap<String, Namespace>,
-    classes: HashMap<String, ClassFolder>,
-}
-
-#[derive(Debug)]
-pub struct ClassFolder {
-    name: String,
-    files: Vec<String>,
-    namespaces: HashMap<String, Namespace>,
-    classes: HashMap<String, ClassFolder>,
-}
 
 impl SessionState {
     pub fn parse_path_async(arc: SessionStateArc) -> Result<Vec<JoinHandle<Result<()>>>> {

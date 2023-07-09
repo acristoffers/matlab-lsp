@@ -9,6 +9,7 @@ mod formatter;
 mod handlers;
 mod parsed_file;
 mod session_state;
+mod types;
 mod utils;
 
 use std::collections::HashMap;
