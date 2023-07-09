@@ -9,7 +9,7 @@ chardetng = "0.1.17"
 clap = { version = "4.1.13", features = ["derive", "env"] }
 crossbeam-channel = "0.5.6"
 encoding_rs = "0.8.32"
-log = "0.4.17"
+log = { version = "0.4.17", features = ["max_level_debug", "release_max_level_warn"] }
 lsp-server = "0.7.1"
 lsp-types = "=0.94"
 matlab_beautifier = { git = "https://github.com/acristoffers/matlab-beautifier" }

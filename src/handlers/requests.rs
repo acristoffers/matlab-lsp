@@ -68,12 +68,12 @@ impl Dispatcher<'_> {
     }
 }
 
-fn cast<R>(req: Request) -> Result<(RequestId, R::Params), ExtractError<Request>>
+fn cast<R>(request: Request) -> Result<(RequestId, R::Params), ExtractError<Request>>
 where
     R: lsp_types::request::Request,
     R::Params: serde::de::DeserializeOwned,
 {
-    req.extract(R::METHOD)
+    request.extract(R::METHOD)
 }
 
 pub fn handle_request(state: SessionStateArc, request: &Request) -> Result<Option<ExitCode>> {

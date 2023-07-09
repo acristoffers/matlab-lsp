@@ -61,12 +61,12 @@ impl Dispatcher<'_> {
     }
 }
 
-fn cast<N>(not: Notification) -> Result<N::Params, ExtractError<Notification>>
+fn cast<N>(notification: Notification) -> Result<N::Params, ExtractError<Notification>>
 where
     N: lsp_types::notification::Notification,
     N::Params: serde::de::DeserializeOwned,
 {
-    not.extract(N::METHOD)
+    notification.extract(N::METHOD)
 }
 
 pub fn handle_notification(
