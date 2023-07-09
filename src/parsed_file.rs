@@ -4,20 +4,20 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-use std::collections::HashMap;
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 
 use crate::formatter::format;
-pub use crate::types::{FileType, FileTypeFunction, ParsedFile};
-use crate::utils::read_to_string;
+use crate::types::{ClassDefinition, FunctionDefinition, Workspace};
+pub use crate::types::{FileType, FunctionSignature, ParsedFile};
+use crate::utils::{function_signature, lock_mutex, read_to_string, SessionStateArc};
 use anyhow::{anyhow, Context, Result};
-use log::{error, info};
+use log::{debug, error, info};
 use lsp_types::Url;
-use tree_sitter::Node;
 
 impl ParsedFile {
     pub fn parse(&mut self) -> Result<()> {
-        info!("Parsing {}", self.file.as_str());
+        info!("Parsing {}", self.path.as_str());
         self.load_contents()?;
         let mut parser = tree_sitter::Parser::new();
         parser
@@ -27,18 +27,18 @@ impl ParsedFile {
             .parse(&self.contents, None)
             .ok_or_else(|| anyhow!("Could not parse file."))?;
         self.tree = Some(tree);
-        self.define_type()?;
-        self.dump_contents();
-        info!("Parsed {}", self.file.as_str());
+        info!("Parsed {}", self.path.as_str());
         Ok(())
     }
 
     pub fn format(&mut self) -> Option<String> {
         if let Some(tree) = &self.tree {
             if tree.root_node().has_error() {
+                debug!("Cannot format, has errors.");
                 return None;
             }
         } else {
+            debug!("Cannot format, has no tree.");
             return None;
         }
         if let Err(err) = self.load_contents() {
@@ -66,175 +66,142 @@ impl ParsedFile {
                 scope += segment.as_str();
             }
         }
+        let file = Url::parse(file_uri.as_str())?;
+        let file_name: String = if let Some(segs) = file.path_segments() {
+            if let Some(name) = segs.filter(|c| !c.is_empty()).last() {
+                if let Some(name) = name.to_string().strip_suffix(".m") {
+                    name.into()
+                } else {
+                    name.into()
+                }
+            } else {
+                "".into()
+            }
+        } else {
+            "".into()
+        };
         let mut parsed_file = ParsedFile {
             contents: code,
-            file: Url::parse(file_uri.as_str())?,
-            tree: None,
-            open: false,
+            path,
+            name: file_name,
             file_type: FileType::MScript,
-            in_classfolder: path.contains('@'),
-            in_namespace: path.contains('+'),
-            scope,
+            in_classfolder: None,
+            in_namespace: None,
+            open: false,
+            tree: None,
+            workspace: Workspace::default(),
         };
         parsed_file.parse()?;
         Ok(parsed_file)
     }
 
-    fn load_contents(&mut self) -> Result<()> {
+    pub fn load_contents(&mut self) -> Result<()> {
         if !self.open {
-            if self.file.scheme() != "file" {
-                return Err(anyhow!("File is neither open nor in file system"));
-            }
-            let mut file = std::fs::File::open(self.file.path())?;
+            let mut file = std::fs::File::open(self.path.clone())?;
             self.contents = read_to_string(&mut file, None)?.0;
         }
         Ok(())
     }
 
-    fn dump_contents(&mut self) {
+    pub fn dump_contents(&mut self) {
         if !self.open {
             self.contents = "".into();
         }
     }
 
-    fn define_type(&mut self) -> Result<()> {
-        if let Some(tree) = &self.tree {
+    pub fn define_type(
+        parsed_file: Arc<Mutex<ParsedFile>>,
+        namespace: String,
+        state: SessionStateArc,
+    ) -> Result<()> {
+        debug!("Defining the type of a file.");
+        let mut state = lock_mutex(&state)?;
+        let mut parsed_file_lock = lock_mutex(&parsed_file)?;
+        debug!("Locked the mutexes. File: {}", parsed_file_lock.path);
+        if let Some(tree) = &parsed_file_lock.tree {
+            debug!("File has a tree, continuing...");
             let tree = tree.clone();
             let root = tree.root_node();
             let mut cursor = root.walk();
             if root.child_count() > 0 {
+                // Finds the first non-comment line.
                 if let Some(child) = root.named_children(&mut cursor).find(|c| !c.is_extra()) {
-                    self.file_type = match child.kind() {
+                    let file_type = match child.kind() {
                         "class_definition" => {
+                            debug!("It's a class definition. Parsing.");
                             if let Some(name) = child.child_by_field_name("name") {
-                                FileType::Class(name.utf8_text(self.contents.as_bytes())?.into())
+                                let class_name = name
+                                    .utf8_text(parsed_file_lock.contents.as_bytes())?
+                                    .to_string();
+                                let qualified_name = if !namespace.is_empty() {
+                                    namespace + "." + class_name.as_str()
+                                } else {
+                                    class_name.clone()
+                                };
+                                let class_def = ClassDefinition {
+                                    parsed_file: Arc::clone(&parsed_file),
+                                    loc: name.range().into(),
+                                    name: class_name,
+                                    path: qualified_name.clone(),
+                                };
+                                let class_def = Arc::new(Mutex::new(class_def));
+                                state
+                                    .workspace
+                                    .classes
+                                    .insert(qualified_name, Arc::clone(&class_def));
+                                FileType::Class(class_def)
                             } else {
                                 return Err(anyhow!("Could not find class name"));
                             }
                         }
                         "function_definition" => {
-                            FileType::Function(self.define_function_type(child)?)
+                            debug!("It's a function definition. Parsing.");
+                            let fn_sig = function_signature(&parsed_file_lock, child)?;
+                            debug!("Got signature for {}", fn_sig.name);
+                            let qualified_name = if !namespace.is_empty() {
+                                namespace + "." + fn_sig.name.as_str()
+                            } else {
+                                fn_sig.name.clone()
+                            };
+                            let fn_def = FunctionDefinition {
+                                loc: fn_sig.name_range,
+                                parsed_file: Arc::clone(&parsed_file),
+                                name: fn_sig.name.clone(),
+                                signature: fn_sig,
+                                path: qualified_name.clone(),
+                            };
+                            let fn_def = Arc::new(Mutex::new(fn_def));
+                            debug!("Inserting function {qualified_name} into state.");
+                            state
+                                .workspace
+                                .functions
+                                .insert(qualified_name, Arc::clone(&fn_def));
+                            FileType::Function(Arc::clone(&fn_def))
                         }
-                        _ => FileType::MScript,
-                    }
+                        _ => {
+                            let qualified_name = if !namespace.is_empty() {
+                                namespace + "." + parsed_file_lock.name.as_str()
+                            } else {
+                                parsed_file_lock.name.clone()
+                            };
+                            state
+                                .workspace
+                                .scripts
+                                .insert(qualified_name, Arc::clone(&parsed_file));
+                            FileType::MScript
+                        }
+                    };
+                    debug!(
+                        "Defined {} to be of type {:#?}",
+                        parsed_file_lock.path, file_type
+                    );
+                    parsed_file_lock.file_type = file_type;
                 }
             }
             Ok(())
         } else {
-            error!("File has no tree: {}", self.file.as_str());
+            error!("File has no tree: {}", parsed_file_lock.path.as_str());
             Err(anyhow!("File has no tree"))
         }
-    }
-
-    fn define_function_type(&mut self, node: Node) -> Result<FileTypeFunction> {
-        let name = if let Some(name) = node.child_by_field_name("name") {
-            name.utf8_text(self.contents.as_bytes())?.to_string()
-        } else {
-            return Err(anyhow!("Could not find class name"));
-        };
-        let mut cursor = node.walk();
-        let mut argout: usize = 0;
-        let mut vargout = false;
-        let mut argout_names = vec![];
-        if let Some(output) = node
-            .named_children(&mut cursor)
-            .find(|c| c.kind() == "function_output")
-        {
-            if let Some(args) = output.child(0) {
-                if args.kind() == "identifier" {
-                    argout = 1;
-                    argout_names.push(args.utf8_text(self.contents.as_bytes())?.into());
-                } else {
-                    argout = args.named_child_count();
-                    let mut cursor2 = args.walk();
-                    for arg_name in args
-                        .named_children(&mut cursor2)
-                        .filter(|c| c.kind() == "identifier")
-                        .filter_map(|c| c.utf8_text(self.contents.as_bytes()).ok())
-                        .map(String::from)
-                    {
-                        if arg_name == "varargout" {
-                            vargout = true;
-                        } else {
-                            argout_names.push(arg_name);
-                        }
-                    }
-                    if vargout {
-                        argout -= 1;
-                    }
-                }
-            }
-        }
-        let mut argin: usize = 0;
-        let mut vargin = false;
-        let mut argin_names = vec![];
-        let mut vargin_names = vec![];
-        if let Some(inputs) = node
-            .named_children(&mut cursor)
-            .find(|c| c.kind() == "function_arguments")
-        {
-            argin = inputs.named_child_count();
-            let mut cursor2 = node.walk();
-            let mut cursor3 = node.walk();
-            let mut cursor4 = node.walk();
-            for arg_name in inputs
-                .named_children(&mut cursor2)
-                .filter_map(|c| c.utf8_text(self.contents.as_bytes()).ok())
-                .map(String::from)
-            {
-                argin_names.push(arg_name);
-            }
-            let mut optional_arguments = HashMap::new();
-            for argument in node
-                .named_children(&mut cursor2)
-                .filter(|c| c.kind() == "arguments_statement")
-            {
-                if let Some(attributes) = argument
-                    .named_children(&mut cursor3)
-                    .find(|c| c.kind() == "attributes")
-                {
-                    if attributes
-                        .named_children(&mut cursor4)
-                        .filter_map(|c| c.utf8_text(self.contents.as_bytes()).ok())
-                        .any(|c| c == "Output")
-                    {
-                        continue;
-                    }
-                }
-                for property in argument
-                    .named_children(&mut cursor3)
-                    .filter_map(|c| c.child_by_field_name("name"))
-                    .filter(|c| c.kind() == "property_name")
-                {
-                    let arg_name = property
-                        .named_child(0)
-                        .unwrap()
-                        .utf8_text(self.contents.as_bytes())?
-                        .to_string();
-                    argin_names.retain(|e| *e != arg_name);
-                    optional_arguments.insert(arg_name, ());
-                    let opt_arg_name = property
-                        .named_child(1)
-                        .unwrap()
-                        .utf8_text(self.contents.as_bytes())?
-                        .to_string();
-                    vargin_names.push(opt_arg_name);
-                }
-            }
-            let vargin_count = optional_arguments.keys().count();
-            vargin = vargin_count > 0;
-            argin -= vargin_count;
-        }
-        let function = FileTypeFunction {
-            name,
-            argin,
-            argout,
-            vargin,
-            vargout,
-            argout_names,
-            argin_names,
-            vargin_names,
-        };
-        Ok(function)
     }
 }

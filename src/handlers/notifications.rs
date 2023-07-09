@@ -6,12 +6,15 @@
 
 use std::path::Path;
 use std::process::ExitCode;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
+use crate::analysis::defref;
 use crate::parsed_file::{FileType, ParsedFile};
-use crate::utils::{lock_mutex, range_to_bytes, read_to_string, SessionStateArc};
+use crate::types::{Range, Workspace};
+use crate::utils::{lock_mutex, read_to_string, SessionStateArc};
 
 use anyhow::{anyhow, Result};
+use itertools::Itertools;
 use log::{debug, info};
 use lsp_server::{ExtractError, Notification};
 use lsp_types::notification::{
@@ -90,6 +93,7 @@ fn handle_text_document_did_open(
         "documentText/didOpen: {}",
         params.text_document.uri.as_str()
     );
+    let mut lock = lock_mutex(&state)?;
     let contents = read_to_string(&mut params.text_document.text.as_bytes(), None)?.0;
     let path = params.text_document.uri.path().to_string();
     let path_p = Path::new(&path);
@@ -103,20 +107,46 @@ fn handle_text_document_did_open(
             scope += segment.as_str();
         }
     }
-    let mut parsed_code = ParsedFile {
-        file: params.text_document.uri,
-        contents,
-        tree: None,
-        open: true,
-        file_type: FileType::MScript,
-        in_classfolder: path.contains('@'),
-        in_namespace: path.contains('+'),
-        scope,
+    let file_name: String = if let Some(segs) = params.text_document.uri.path_segments() {
+        if let Some(name) = segs
+            .filter(|c| !c.is_empty())
+            .flat_map(|c| c.strip_suffix(".m"))
+            .last()
+        {
+            name.into()
+        } else {
+            "".into()
+        }
+    } else {
+        "".into()
     };
-    parsed_code.parse()?;
-    lock_mutex(&state)?
-        .files
-        .insert(parsed_code.file.as_str().into(), parsed_code);
+    let mut parsed_file = ParsedFile {
+        contents,
+        path: params.text_document.uri.path().to_string(),
+        name: file_name.clone(),
+        file_type: FileType::MScript,
+        in_classfolder: None,
+        in_namespace: None,
+        open: true,
+        tree: None,
+        workspace: Workspace::default(),
+    };
+    let key = parsed_file.path.clone();
+    parsed_file.parse()?;
+    let parsed_file = Arc::new(Mutex::new(parsed_file));
+    let namespace = if let Some(segments) = params.text_document.uri.path_segments() {
+        segments
+            .map(|s| s.to_string())
+            .flat_map(|s| s.strip_prefix(|f| f == '+' || f == '@').map(String::from))
+            .join(".")
+    } else {
+        "".to_string()
+    };
+    defref::analyze(&lock, Arc::clone(&parsed_file))?;
+    lock.files.insert(key.clone(), Arc::clone(&parsed_file));
+    drop(lock);
+    ParsedFile::define_type(Arc::clone(&parsed_file), namespace, Arc::clone(&state))?;
+    debug!("Inserted {key} into the store");
     Ok(None)
 }
 
@@ -131,9 +161,21 @@ fn handle_text_document_did_close(
     let path = params.text_document.uri.path();
     if params.text_document.uri.scheme() == "file" && std::path::Path::new(path).exists() {
         let parsed_file = ParsedFile::parse_file(path.into())?;
-        lock_mutex(&state)?
-            .files
-            .insert(parsed_file.file.as_str().into(), parsed_file);
+        let parsed_file = Arc::new(Mutex::new(parsed_file));
+        let namespace = if let Some(segments) = params.text_document.uri.path_segments() {
+            segments
+                .map(|s| s.to_string())
+                .filter(|s| s.starts_with('+') || s.starts_with('@'))
+                .flat_map(|s| s.strip_prefix(|f| f == '+' || f == '@').map(String::from))
+                .join(".")
+        } else {
+            "".into()
+        };
+        ParsedFile::define_type(Arc::clone(&parsed_file), namespace, Arc::clone(&state))?;
+        lock_mutex(&state)?.files.insert(
+            lock_mutex(&parsed_file)?.path.clone(),
+            Arc::clone(&parsed_file),
+        );
     } else {
         lock_mutex(&state)?
             .files
@@ -150,12 +192,12 @@ fn handle_text_document_did_change(
         "documentText/didChange: {}",
         params.text_document.uri.as_str(),
     );
-    let file_name = params.text_document.uri.as_str().to_string();
-    let mut state = lock_mutex(&state)?;
-    let parsed_file = state
+    let file_path = params.text_document.uri.path().to_string();
+    let parsed_file = lock_mutex(&state)?
         .files
-        .get_mut(&file_name)
-        .ok_or(anyhow!("No such file: {file_name}"))?;
+        .get(&file_path)
+        .ok_or(anyhow!("No such file: {file_path}"))?
+        .clone();
     for change in params.content_changes {
         debug!(
             "Appying change with range {} and contents {}",
@@ -164,21 +206,28 @@ fn handle_text_document_did_change(
         );
         match change.range {
             Some(range) => {
-                let (start, mut end) = range_to_bytes(range, parsed_file)?;
-                end = end.min(parsed_file.contents.len() - 1);
-                if start == end {
-                    parsed_file.contents.insert_str(start, change.text.as_str());
+                let range: Range = range.into();
+                let mut parsed_file_lock = lock_mutex(&parsed_file)?;
+                let ts_range = range.find_bytes(&parsed_file_lock);
+                let (start, mut end) = (ts_range.start_byte, ts_range.end_byte);
+                end = end.min(parsed_file_lock.contents.len().saturating_sub(1));
+                if start >= end {
+                    parsed_file_lock
+                        .contents
+                        .insert_str(start, change.text.as_str());
                 } else {
-                    eprintln!("Replacing from {start} to {end} with {}", change.text);
-                    parsed_file
+                    debug!("Replacing from {start} to {end} with {}", change.text);
+                    parsed_file_lock
                         .contents
                         .replace_range(start..end, change.text.as_str());
                 }
-                parsed_file.parse()?;
             }
-            None => parsed_file.contents = change.text,
+            None => lock_mutex(&parsed_file)?.contents = change.text,
         }
     }
+    lock_mutex(&parsed_file)?.parse()?;
+    let lock = lock_mutex(&state)?;
+    defref::analyze(&lock, Arc::clone(&parsed_file))?;
     Ok(None)
 }
 

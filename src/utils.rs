@@ -4,76 +4,186 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use crate::parsed_file::ParsedFile;
+use crate::parsed_file::{FunctionSignature, ParsedFile};
 use crate::session_state::SessionState;
 
 use anyhow::{anyhow, Result};
-use lsp_types::Range;
-use tree_sitter::Point;
+use log::debug;
+use tree_sitter::Node;
 
 pub type SessionStateArc = Arc<Mutex<&'static mut SessionState>>;
 
-/// Transforms a Range into bytes
-pub(crate) fn range_to_bytes(range: Range, parsed_file: &ParsedFile) -> Result<(usize, usize)> {
-    let start = Point::new(
-        range.start.line.try_into()?,
-        range.start.character.try_into()?,
-    );
-    let end = Point::new(range.end.line.try_into()?, range.end.character.try_into()?);
-    let mut byte = 0;
-    let mut row = 0;
-    let mut col = 0;
-    let mut start_byte = 0;
-    let mut end_byte = 0;
-    let mut chars = parsed_file.contents.chars();
-    if let Some(tree) = &parsed_file.tree {
-        if let Some(node) = tree.root_node().descendant_for_point_range(start, end) {
-            byte = node.start_byte();
-            row = node.start_position().row;
-            col = node.start_position().column;
-            chars = parsed_file.contents[byte..].chars();
-        }
+////////////////////////////////////////////////////////////////////////////////
+///                                                                          ///
+///                          Better Error Handling                           ///
+///                                                                          ///
+////////////////////////////////////////////////////////////////////////////////
+
+pub trait TraversingError<T> {
+    fn err_at_loc(self, node: &Node) -> Result<T>;
+}
+
+impl<T> TraversingError<T> for Option<T> {
+    fn err_at_loc(self, node: &Node) -> Result<T> {
+        self.ok_or_else(|| {
+            anyhow!(
+                "Error accessing token around line {} col {}",
+                node.range().start_point.row,
+                node.range().start_point.column
+            )
+        })
     }
-    loop {
-        if row == start.row && col == start.column {
-            start_byte = byte;
-        }
-        if row == end.row && col == end.column {
-            end_byte = byte;
-            break;
-        }
-        if let Some(c) = chars.next() {
-            byte += c.len_utf8();
-            col += 1;
-            if c == '\n' {
-                row += 1;
-                col = 0;
-            }
-        } else {
-            break;
-        }
-    }
-    Ok((start_byte, end_byte))
+}
+
+#[macro_export]
+macro_rules! code_loc {
+    () => {
+        anyhow!(format!("{}:{}", file!(), line!()))
+    };
+    ($msg:expr) => {
+        anyhow!(format!("{}:{} - {}", file!(), line!(), $msg))
+    };
 }
 
 /// Locks a mutex, and adds an error message in case of error.
 pub(crate) fn lock_mutex<T>(arc: &Arc<Mutex<T>>) -> Result<MutexGuard<'_, T>> {
-    arc.lock().map_err(|_| anyhow!("Could not lock mutex."))
+    arc.lock().map_err(|_| code_loc!("Could not lock mutex."))
 }
 
-// The functions below were taken from the helix editor
+pub fn function_signature(
+    parsed_file: &MutexGuard<'_, ParsedFile>,
+    node: Node,
+) -> Result<FunctionSignature> {
+    debug!("Scanning signature.");
+    debug!("File size: {}", parsed_file.contents.len());
+    let (name, name_range) = if let Some(name) = node.child_by_field_name("name") {
+        let name_range = name.range();
+        let name = name.utf8_text(parsed_file.contents.as_bytes())?.to_string();
+        debug!("Found name.");
+        (name, name_range)
+    } else {
+        debug!("Could not find name.");
+        return Err(anyhow!("Could not find function name"));
+    };
+    let mut cursor = node.walk();
+    let mut argout: usize = 0;
+    let mut vargout = false;
+    let mut argout_names = vec![];
+    if let Some(output) = node
+        .named_children(&mut cursor)
+        .find(|c| c.kind() == "function_output")
+    {
+        debug!("Function has output.");
+        if let Some(args) = output.child(0) {
+            if args.kind() == "identifier" {
+                debug!("A single one.");
+                argout = 1;
+                argout_names.push(args.utf8_text(parsed_file.contents.as_bytes())?.into());
+            } else {
+                debug!("Multiple outputs.");
+                argout = args.named_child_count();
+                let mut cursor2 = args.walk();
+                for arg_name in args
+                    .named_children(&mut cursor2)
+                    .filter(|c| c.kind() == "identifier")
+                    .filter_map(|c| c.utf8_text(parsed_file.contents.as_bytes()).ok())
+                    .map(String::from)
+                {
+                    if arg_name == "varargout" {
+                        vargout = true;
+                    } else {
+                        argout_names.push(arg_name);
+                    }
+                }
+                if vargout {
+                    argout -= 1;
+                }
+            }
+        }
+    }
+    let mut argin: usize = 0;
+    let mut vargin = false;
+    let mut argin_names = vec![];
+    let mut vargin_names = vec![];
+    if let Some(inputs) = node
+        .named_children(&mut cursor)
+        .find(|c| c.kind() == "function_arguments")
+    {
+        argin = inputs.named_child_count();
+        let mut cursor2 = node.walk();
+        let mut cursor3 = node.walk();
+        let mut cursor4 = node.walk();
+        for arg_name in inputs
+            .named_children(&mut cursor2)
+            .filter_map(|c| c.utf8_text(parsed_file.contents.as_bytes()).ok())
+            .map(String::from)
+        {
+            argin_names.push(arg_name);
+        }
+        let mut optional_arguments = HashMap::new();
+        for argument in node
+            .named_children(&mut cursor2)
+            .filter(|c| c.kind() == "arguments_statement")
+        {
+            if let Some(attributes) = argument
+                .named_children(&mut cursor3)
+                .find(|c| c.kind() == "attributes")
+            {
+                if attributes
+                    .named_children(&mut cursor4)
+                    .filter_map(|c| c.utf8_text(parsed_file.contents.as_bytes()).ok())
+                    .any(|c| c == "Output")
+                {
+                    continue;
+                }
+            }
+            for property in argument
+                .named_children(&mut cursor3)
+                .filter_map(|c| c.child_by_field_name("name"))
+                .filter(|c| c.kind() == "property_name")
+            {
+                let arg_name = property
+                    .named_child(0)
+                    .ok_or(anyhow!(code_loc!()))?
+                    .utf8_text(parsed_file.contents.as_bytes())?
+                    .to_string();
+                argin_names.retain(|e| *e != arg_name);
+                optional_arguments.insert(arg_name, ());
+                let opt_arg_name = property
+                    .named_child(1)
+                    .ok_or(anyhow!(code_loc!()))?
+                    .utf8_text(parsed_file.contents.as_bytes())?
+                    .to_string();
+                vargin_names.push(opt_arg_name);
+            }
+        }
+        let vargin_count = optional_arguments.keys().count();
+        vargin = vargin_count > 0;
+        argin -= vargin_count;
+    }
+    let function = FunctionSignature {
+        name_range: name_range.into(),
+        name,
+        argin,
+        argout,
+        vargin,
+        vargout,
+        argout_names,
+        argin_names,
+        vargin_names,
+    };
+    Ok(function)
+}
 
-/// Reads the first chunk from a Reader into the given buffer
-/// and detects the encoding.
-///
-/// By default, the encoding of the text is auto-detected by
-/// `encoding_rs` for_bom, and if it fails, from `chardetng`
-/// crate which requires sample data from the reader.
-/// As a manual override to this auto-detection is possible, the
-/// same data is read into `buf` to ensure symmetry in the upcoming
-/// loop.
+////////////////////////////////////////////////////////////////////////////////
+///                                                                          ///
+///           The functions below were taken from the helix editor           ///
+///                                                                          ///
+////////////////////////////////////////////////////////////////////////////////
+
 fn read_and_detect_encoding<R: std::io::Read + ?Sized>(
     reader: &mut R,
     encoding: Option<&'static encoding_rs::Encoding>,
@@ -97,7 +207,6 @@ fn read_and_detect_encoding<R: std::io::Read + ?Sized>(
             (encoding_detector.guess(None, true), false)
         });
     let decoder = encoding.new_decoder();
-
     Ok((encoding, has_bom, decoder, read))
 }
 
@@ -106,23 +215,17 @@ pub(crate) fn read_to_string<R: std::io::Read + ?Sized>(
     encoding: Option<&'static encoding_rs::Encoding>,
 ) -> Result<(String, &'static encoding_rs::Encoding, bool)> {
     let mut buf = [0u8; 0x2000];
-
     let (encoding, has_bom, mut decoder, read) =
         read_and_detect_encoding(reader, encoding, &mut buf)?;
-
     let mut slice = &buf[..read];
     let mut is_empty = read == 0;
     let mut buf_string = String::with_capacity(buf.len());
-
     loop {
         let mut total_read = 0usize;
-
         loop {
             let (result, read, ..) =
                 decoder.decode_to_string(&slice[total_read..], &mut buf_string, is_empty);
-
             total_read += read;
-
             match result {
                 encoding_rs::CoderResult::InputEmpty => {
                     debug_assert_eq!(slice.len(), total_read);
@@ -134,12 +237,10 @@ pub(crate) fn read_to_string<R: std::io::Read + ?Sized>(
                 }
             }
         }
-
         if is_empty {
             debug_assert_eq!(reader.read(&mut buf)?, 0);
             break;
         }
-
         let read = reader.read(&mut buf)?;
         slice = &buf[..read];
         is_empty = read == 0;
