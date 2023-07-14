@@ -30,11 +30,11 @@ use handlers::{handle_notification, handle_request};
 use anyhow::Result;
 use log::{debug, error, info};
 use lsp_server::{Connection, Message};
-use lsp_types::ServerCapabilities;
 use lsp_types::{
     OneOf, PositionEncodingKind, TextDocumentSyncCapability, TextDocumentSyncKind,
     TextDocumentSyncOptions,
 };
+use lsp_types::{SaveOptions, ServerCapabilities};
 use process_alive::Pid;
 use simplelog::{CombinedLogger, Config, WriteLogger};
 
@@ -88,7 +88,12 @@ fn start_server(arguments: Arguments) -> Result<ExitCode> {
                 open_close: Some(true),
                 will_save: Some(false),
                 will_save_wait_until: Some(false),
-                save: Some(lsp_types::TextDocumentSyncSaveOptions::Supported(false)),
+                save: Some(
+                    SaveOptions {
+                        include_text: Some(true),
+                    }
+                    .into(),
+                ),
             },
         )),
         position_encoding: Some(PositionEncodingKind::UTF8),

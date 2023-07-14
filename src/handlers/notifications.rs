@@ -18,11 +18,26 @@ use itertools::Itertools;
 use log::{debug, info};
 use lsp_server::{ExtractError, Notification};
 use lsp_types::notification::{
-    DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument, Exit,
+    DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument, DidSaveTextDocument, Exit,
 };
 use lsp_types::{
     DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
+    DidSaveTextDocumentParams,
 };
+
+pub fn handle_notification(
+    state: SessionStateArc,
+    notification: &Notification,
+) -> Result<Option<ExitCode>> {
+    let mut dispatcher = Dispatcher::new(Arc::clone(&state), notification);
+    dispatcher
+        .handle::<DidOpenTextDocument>(handle_text_document_did_open)
+        .handle::<DidCloseTextDocument>(handle_text_document_did_close)
+        .handle::<DidChangeTextDocument>(handle_text_document_did_change)
+        .handle::<DidSaveTextDocument>(handle_text_document_did_save)
+        .handle::<Exit>(handle_exit)
+        .finish()
+}
 
 struct Dispatcher<'a> {
     state: SessionStateArc,
@@ -70,19 +85,6 @@ where
     N::Params: serde::de::DeserializeOwned,
 {
     notification.extract(N::METHOD)
-}
-
-pub fn handle_notification(
-    state: SessionStateArc,
-    notification: &Notification,
-) -> Result<Option<ExitCode>> {
-    let mut dispatcher = Dispatcher::new(Arc::clone(&state), notification);
-    dispatcher
-        .handle::<DidOpenTextDocument>(handle_text_document_did_open)
-        .handle::<DidCloseTextDocument>(handle_text_document_did_close)
-        .handle::<DidChangeTextDocument>(handle_text_document_did_change)
-        .handle::<Exit>(handle_exit)
-        .finish()
 }
 
 fn handle_text_document_did_open(
@@ -228,6 +230,31 @@ fn handle_text_document_did_change(
     lock_mutex(&parsed_file)?.parse()?;
     let lock = lock_mutex(&state)?;
     defref::analyze(&lock, Arc::clone(&parsed_file))?;
+    Ok(None)
+}
+
+fn handle_text_document_did_save(
+    state: SessionStateArc,
+    params: DidSaveTextDocumentParams,
+) -> Result<Option<ExitCode>> {
+    info!(
+        "documentText/didSave: {}",
+        params.text_document.uri.as_str(),
+    );
+    let file_path = params.text_document.uri.path().to_string();
+    let lock = lock_mutex(&state)?;
+    let parsed_file = lock
+        .files
+        .get(&file_path)
+        .ok_or(anyhow!("No such file: {file_path}"))?
+        .clone();
+    if let Some(content) = params.text {
+        let mut parsed_file_lock = lock_mutex(&parsed_file)?;
+        parsed_file_lock.contents = content;
+        parsed_file_lock.parse()?;
+        drop(parsed_file_lock);
+        defref::analyze(&lock, Arc::clone(&parsed_file))?;
+    }
     Ok(None)
 }
 
