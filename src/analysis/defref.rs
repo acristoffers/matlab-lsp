@@ -95,7 +95,18 @@ fn analyze_impl(
             path: parsed_file.path.clone(),
             signature: signature.clone(),
         };
-        let definition = Arc::new(Mutex::new(definition));
+        let mut definition = Arc::new(Mutex::new(definition));
+        // Does this signature already exist?
+        for (f_name, function) in &state.workspace.functions {
+            let f_lock = lock_mutex(function)?;
+            if *f_name == signature.name
+                && f_lock.signature.name_range == signature.name_range
+                && Arc::ptr_eq(&parsed_file_arc, &f_lock.parsed_file)
+            {
+                definition = Arc::clone(function);
+                break;
+            }
+        }
         if let Some(parent) = parent_function(node) {
             if let Some((_, ws)) = functions.get_mut(&parent.id()) {
                 debug!("Adding function {} to parent.", signature.name);
@@ -174,7 +185,7 @@ fn analyze_impl(
                 }
             }
             "identifier" => {
-                debug!("Defining idenfier reference.");
+                debug!("Defining identifier reference.");
                 if let Some(parent) = node.parent() {
                     if parent.kind() == "field_expression" || parent.kind() == "function_definition"
                     {
@@ -659,10 +670,18 @@ fn ref_to_var(
     node: Node,
 ) -> Result<Vec<Reference>> {
     let mut references = vec![];
+    let (is_assignment, p_range) = if let Some(parent) = parent_of_kind("assignment", node) {
+        (true, parent.range().into())
+    } else {
+        (false, Range::default())
+    };
     for (_, ws) in scopes.iter().rev().flat_map(|i| functions.get(i)) {
         for v in ws.variables.iter().rev() {
             let v_lock = lock_mutex(v)?;
             if v_lock.name == name {
+                if is_assignment && p_range.fully_contains(v_lock.loc) {
+                    continue;
+                }
                 let r = Reference {
                     loc: node.range().into(),
                     name: name.clone(),
@@ -672,9 +691,12 @@ fn ref_to_var(
             }
         }
     }
-    for v in &workspace.variables {
+    for v in workspace.variables.iter().rev() {
         let v_lock = lock_mutex(v)?;
         if v_lock.name == name {
+            if is_assignment && p_range.fully_contains(v_lock.loc) {
+                continue;
+            }
             let r = Reference {
                 loc: node.range().into(),
                 name: name.clone(),

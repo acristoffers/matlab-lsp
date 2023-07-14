@@ -5,7 +5,7 @@
  */
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::{spawn, JoinHandle};
 
 use anyhow::{anyhow, Context, Result};
@@ -15,20 +15,33 @@ use crate::analysis::defref;
 use crate::code_loc;
 use crate::parsed_file::{FileType, ParsedFile};
 pub use crate::types::{ClassFolder, Namespace, SessionState};
-use crate::utils::{lock_mutex, SessionStateArc};
+use crate::utils::{lock_mutex, rescan_file, SessionStateArc};
 
 impl SessionState {
     pub fn start_worker(state: SessionStateArc) -> Result<JoinHandle<Result<()>>> {
         let handle = spawn(move || -> Result<()> {
             SessionState::full_scan_path(Arc::clone(&state))?;
-            if let Err(err) = SessionState::rescan_open_files(Arc::clone(&state)) {
-                error!("Error scanning open files: {err}");
-            }
             loop {
-                let lock = lock_mutex(&state)?;
+                let mut lock = lock_mutex(&state)?;
                 if lock.client_requested_shutdown {
                     debug!("Shutdown requested, leaving thread.");
                     break;
+                }
+                if lock.rescan_open_files {
+                    debug!("Rescanning open files.");
+                    if let Err(err) = SessionState::rescan_open_files(&mut lock) {
+                        error!("Error scanning open files: {err}");
+                    }
+                    lock.rescan_open_files = false;
+                    continue;
+                }
+                if lock.rescan_all_files {
+                    debug!("Rescanning all files.");
+                    if let Err(err) = SessionState::rescan_all_files(&mut lock) {
+                        error!("Error scanning all files: {err}");
+                    }
+                    lock.rescan_all_files = false;
+                    continue;
                 }
                 drop(lock);
                 std::thread::sleep(std::time::Duration::from_secs(1));
@@ -38,19 +51,33 @@ impl SessionState {
         Ok(handle)
     }
 
-    fn rescan_open_files(state: SessionStateArc) -> Result<()> {
+    fn rescan_open_files(state: &mut MutexGuard<'_, &mut SessionState>) -> Result<()> {
         debug!("Rescanning open files.");
-        let state = Arc::clone(&state);
-        let lock = lock_mutex(&state).context(code_loc!("Cannot lock state."))?;
-        let files = lock.files.values();
-        for file in files {
-            let file_lock = lock_mutex(file).context(code_loc!("Cannot lock file."))?;
-            let is_open = file_lock.open;
-            drop(file_lock);
-            if is_open {
-                if let Err(err) = defref::analyze(&lock, Arc::clone(file)) {
-                    error!("Error analysing file: {err}");
-                }
+        for file in state.files.clone().values() {
+            let file_lock = lock_mutex(file)?;
+            if file_lock.open {
+                drop(file_lock);
+                let file = Arc::clone(file);
+                rescan_file(state, file)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn rescan_all_files(state: &mut MutexGuard<'_, &mut SessionState>) -> Result<()> {
+        debug!("Rescanning open files.");
+        state.workspace.classes.clear();
+        state.workspace.classfolders.clear();
+        state.workspace.functions.clear();
+        state.workspace.namespaces.clear();
+        state.workspace.references.clear();
+        state.workspace.scripts.clear();
+        state.workspace.variables.clear();
+        // Twice, to get cross-references right.
+        for _ in 0..2 {
+            for file in state.files.clone().values() {
+                let file = Arc::clone(file);
+                rescan_file(state, file)?;
             }
         }
         Ok(())
@@ -58,7 +85,7 @@ impl SessionState {
 
     fn full_scan_path(arc: SessionStateArc) -> Result<()> {
         info!("Scanning workspace and path");
-        let lock = lock_mutex(&arc).context(code_loc!())?;
+        let mut lock = lock_mutex(&arc).context(code_loc!())?;
         let mut paths = lock.path.clone();
         if let Some(uri) = &lock.workspace_params.root_uri {
             let path = uri.path().to_string();
@@ -68,6 +95,7 @@ impl SessionState {
             let other: Vec<String> = fs.iter().map(|f| f.uri.path().to_string()).collect();
             paths.extend(other);
         }
+        lock.rescan_open_files = true;
         drop(lock);
         let mut handles = vec![];
         paths.sort();
@@ -117,7 +145,10 @@ impl SessionState {
                 debug!("Working on file {path}");
                 drop(lock);
                 let parsed_file = ParsedFile::parse_file(path).context(code_loc!())?;
-                debug!("Parsed file contains {} bytes of code.", parsed_file.contents.len());
+                debug!(
+                    "Parsed file contains {} bytes of code.",
+                    parsed_file.contents.len()
+                );
                 let parsed_file = Arc::new(Mutex::new(parsed_file));
                 let ns_path = if let Some(ns_) = ns {
                     ns = Some(Arc::clone(&ns_));
@@ -125,7 +156,6 @@ impl SessionState {
                 } else {
                     "".into()
                 };
-                ParsedFile::define_type(Arc::clone(&parsed_file), ns_path, Arc::clone(&state))?;
                 let mut parsed_file_lock = lock_mutex(&parsed_file)?;
                 let path = parsed_file_lock.path.clone();
                 if let Some(ns) = &ns {
@@ -147,6 +177,12 @@ impl SessionState {
                 }
                 debug!("Inserting file {path} into state.");
                 let mut lock = lock_mutex(&state).context(code_loc!())?;
+                ParsedFile::define_type(
+                    &mut lock,
+                    Arc::clone(&parsed_file),
+                    &mut parsed_file_lock,
+                    ns_path,
+                )?;
                 lock.files.insert(path, Arc::clone(&parsed_file));
                 match &parsed_file_lock.file_type {
                     FileType::Function(f) => {
@@ -161,7 +197,8 @@ impl SessionState {
                     }
                     _ => {}
                 }
-                parsed_file_lock.dump_contents();
+                drop(parsed_file_lock);
+                defref::analyze(&lock, Arc::clone(&parsed_file))?;
             } else if entry.metadata().context(code_loc!())?.is_dir() {
                 let name = entry.file_name().to_string_lossy().to_string();
                 let folder_path = entry.path().to_string_lossy().to_string();

@@ -7,19 +7,31 @@
 use std::process::ExitCode;
 use std::sync::Arc;
 
+use crate::analysis::references::find_references_to_symbol;
 use crate::code_loc;
-use crate::types::Range;
+use crate::types::{PosToPoint, Range};
 use crate::utils::{lock_mutex, SessionStateArc};
 
 use anyhow::{anyhow, Context, Result};
 use log::{debug, info};
 use lsp_server::{ExtractError, Message, Request, RequestId, Response};
-use lsp_types::request::{Formatting, GotoDefinition, Shutdown};
+use lsp_types::request::{Formatting, GotoDefinition, References, Shutdown};
 use lsp_types::{
     DocumentFormattingParams, GotoDefinitionParams, GotoDefinitionResponse, Location, Position,
-    TextEdit, Url,
+    ReferenceParams, TextEdit, Url,
 };
 use tree_sitter::Point;
+
+pub fn handle_request(state: SessionStateArc, request: &Request) -> Result<Option<ExitCode>> {
+    debug!("Handling a request.");
+    let mut dispatcher = Dispatcher::new(state, request);
+    dispatcher
+        .handle::<Formatting>(handle_formatting)?
+        .handle::<GotoDefinition>(handle_goto_definition)?
+        .handle::<References>(handle_references)?
+        .handle::<Shutdown>(handle_shutdown)?
+        .finish()
+}
 
 struct Dispatcher<'a> {
     state: SessionStateArc,
@@ -80,16 +92,6 @@ where
     R::Params: serde::de::DeserializeOwned,
 {
     request.extract(R::METHOD)
-}
-
-pub fn handle_request(state: SessionStateArc, request: &Request) -> Result<Option<ExitCode>> {
-    debug!("Handling a request.");
-    let mut dispatcher = Dispatcher::new(state, request);
-    dispatcher
-        .handle::<Formatting>(handle_formatting)?
-        .handle::<GotoDefinition>(handle_goto_definition)?
-        .handle::<Shutdown>(handle_shutdown)?
-        .finish()
 }
 
 fn handle_formatting(
@@ -211,6 +213,31 @@ fn handle_goto_definition(
     } else {
         let resp = Response::new_err(id, 0, "Could not find file.".into());
         let _ = state.sender.send(resp.into());
+    }
+    Ok(None)
+}
+
+fn handle_references(
+    state: SessionStateArc,
+    id: RequestId,
+    params: ReferenceParams,
+) -> Result<Option<ExitCode>> {
+    info!("Received textDocument/references.");
+    let lock = lock_mutex(&state)?;
+    let path = params
+        .text_document_position
+        .text_document
+        .uri
+        .path()
+        .to_string();
+    let loc = params.text_document_position.position.to_point();
+    if let Ok(rs) = find_references_to_symbol(&lock, path, loc) {
+        let result = serde_json::to_value(rs)?;
+        let resp = Response::new_ok(id, result);
+        let _ = lock.sender.send(resp.into());
+    } else {
+        let resp = Response::new_err(id, 0, "Could not find file.".into());
+        let _ = lock.sender.send(resp.into());
     }
     Ok(None)
 }

@@ -7,6 +7,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
 
+use crate::analysis::defref;
 use crate::parsed_file::{FunctionSignature, ParsedFile};
 use crate::session_state::SessionState;
 
@@ -51,6 +52,63 @@ macro_rules! code_loc {
 /// Locks a mutex, and adds an error message in case of error.
 pub(crate) fn lock_mutex<T>(arc: &Arc<Mutex<T>>) -> Result<MutexGuard<'_, T>> {
     arc.lock().map_err(|_| code_loc!("Could not lock mutex."))
+}
+
+pub fn rescan_file(
+    state: &mut MutexGuard<'_, &mut SessionState>,
+    file: Arc<Mutex<ParsedFile>>,
+) -> Result<()> {
+    debug!("Rescaning file.");
+    let mut file_lock = lock_mutex(&file)?;
+    if !file_lock.open {
+        file_lock.load_contents()?;
+    }
+    remove_references_to_file(state, &mut file_lock, Arc::clone(&file))?;
+    file_lock.parse()?;
+    let ns_path = if let Some(ns) = &file_lock.in_namespace {
+        let ns_lock = lock_mutex(ns)?;
+        ns_lock.path.clone()
+    } else {
+        "".into()
+    };
+    ParsedFile::define_type(state, Arc::clone(&file), &mut file_lock, ns_path)?;
+    drop(file_lock);
+    defref::analyze(state, Arc::clone(&file))?;
+    let mut file_lock = lock_mutex(&file)?;
+    if !file_lock.open {
+        file_lock.dump_contents();
+    }
+    Ok(())
+}
+
+fn remove_references_to_file(
+    state: &mut MutexGuard<'_, &mut SessionState>,
+    file: &mut MutexGuard<'_, ParsedFile>,
+    parsed_file: Arc<Mutex<ParsedFile>>,
+) -> Result<()> {
+    'out: for v1 in file.workspace.functions.values() {
+        for (name, v2) in &state.workspace.functions.clone() {
+            if Arc::ptr_eq(v1, v2) {
+                state.workspace.functions.remove(name);
+                break 'out;
+            }
+        }
+    }
+    'out: for v1 in file.workspace.classes.values() {
+        for (name, v2) in &state.workspace.classes.clone() {
+            if Arc::ptr_eq(v1, v2) {
+                state.workspace.functions.remove(name);
+                break 'out;
+            }
+        }
+    }
+    for (name, v1) in &state.workspace.scripts.clone() {
+        if Arc::ptr_eq(v1, &parsed_file) {
+            state.workspace.functions.remove(name);
+            break;
+        }
+    }
+    Ok(())
 }
 
 pub fn function_signature(

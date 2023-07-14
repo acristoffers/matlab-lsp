@@ -22,14 +22,20 @@ use crate::code_loc;
 #[derive(Debug)]
 pub struct SessionState {
     // Misc
-    /// Whether the client requested us to shutdown.
-    pub client_requested_shutdown: bool,
     /// The path given by the user through command line or env var.
     pub path: Vec<String>,
     /// Channel used to send messages to the client.
     pub sender: Sender<Message>,
     /// The workspace parameters sent by the client.
     pub workspace_params: InitializeParams,
+
+    // Worker thread management
+    /// Whether the client requested us to shutdown.
+    pub client_requested_shutdown: bool,
+    /// Whether open files should be rescanned
+    pub rescan_open_files: bool,
+    /// Whether all files should be rescanned
+    pub rescan_all_files: bool,
 
     // Code states and structures
     /// A list of all files in the workspace+path, even the ones inside namespaces.
@@ -187,34 +193,8 @@ impl From<Range> for tree_sitter::Range {
 impl From<lsp_types::Range> for Range {
     fn from(value: lsp_types::Range) -> Self {
         Range {
-            start: Point {
-                row: value
-                    .start
-                    .line
-                    .try_into()
-                    .context(code_loc!("Error converting number."))
-                    .unwrap(),
-                column: value
-                    .start
-                    .character
-                    .try_into()
-                    .context(code_loc!("Error converting number."))
-                    .unwrap(),
-            },
-            end: Point {
-                row: value
-                    .end
-                    .line
-                    .try_into()
-                    .context(code_loc!("Error converting number."))
-                    .unwrap(),
-                column: value
-                    .end
-                    .character
-                    .try_into()
-                    .context(code_loc!("Error converting number."))
-                    .unwrap(),
-            },
+            start: value.start.to_point(),
+            end: value.end.to_point(),
         }
     }
 }
@@ -222,34 +202,8 @@ impl From<lsp_types::Range> for Range {
 impl From<Range> for lsp_types::Range {
     fn from(value: Range) -> Self {
         lsp_types::Range {
-            start: Position::new(
-                value
-                    .start
-                    .row
-                    .try_into()
-                    .context(code_loc!("Error converting number."))
-                    .unwrap(),
-                value
-                    .start
-                    .column
-                    .try_into()
-                    .context(code_loc!("Error converting number."))
-                    .unwrap(),
-            ),
-            end: Position::new(
-                value
-                    .end
-                    .row
-                    .try_into()
-                    .context(code_loc!("Error converting number."))
-                    .unwrap(),
-                value
-                    .end
-                    .column
-                    .try_into()
-                    .context(code_loc!("Error converting number."))
-                    .unwrap(),
-            ),
+            start: value.start.to_position(),
+            end: value.end.to_position(),
         }
     }
 }
@@ -321,5 +275,45 @@ impl Range {
         tree_range.start_byte = start_byte;
         tree_range.end_byte = end_byte;
         tree_range
+    }
+}
+
+pub trait PosToPoint {
+    fn to_point(&self) -> Point;
+}
+
+impl PosToPoint for Position {
+    fn to_point(&self) -> Point {
+        Point {
+            row: self
+                .line
+                .try_into()
+                .context(code_loc!("Error converting number."))
+                .unwrap(),
+            column: self
+                .character
+                .try_into()
+                .context(code_loc!("Error converting number."))
+                .unwrap(),
+        }
+    }
+}
+
+pub trait PointToPos {
+    fn to_position(&self) -> Position;
+}
+
+impl PointToPos for Point {
+    fn to_position(&self) -> Position {
+        Position::new(
+            self.row
+                .try_into()
+                .context(code_loc!("Error converting number."))
+                .unwrap(),
+            self.column
+                .try_into()
+                .context(code_loc!("Error converting number."))
+                .unwrap(),
+        )
     }
 }

@@ -99,11 +99,11 @@ fn start_server(arguments: Arguments) -> Result<ExitCode> {
         position_encoding: Some(PositionEncodingKind::UTF8),
         document_formatting_provider: Some(OneOf::Left(true)),
         definition_provider: Some(OneOf::Left(true)),
+        references_provider: Some(OneOf::Left(true)),
         ..Default::default()
     })?;
     let initialization_params = connection.initialize(server_capabilities)?;
     let session_state = SessionState {
-        client_requested_shutdown: false,
         path: if let Some(path) = arguments.path {
             path.split(':').map(String::from).collect()
         } else {
@@ -111,6 +111,9 @@ fn start_server(arguments: Arguments) -> Result<ExitCode> {
         },
         sender: connection.sender,
         workspace_params: serde_json::from_value(initialization_params)?,
+        client_requested_shutdown: false,
+        rescan_open_files: true,
+        rescan_all_files: true,
         files: HashMap::new(),
         workspace: Workspace::default(),
     };

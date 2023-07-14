@@ -5,12 +5,13 @@
  */
 
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::formatter::format;
+use crate::session_state::SessionState;
 use crate::types::{ClassDefinition, FunctionDefinition, Workspace};
 pub use crate::types::{FileType, FunctionSignature, ParsedFile};
-use crate::utils::{function_signature, lock_mutex, read_to_string, SessionStateArc};
+use crate::utils::{function_signature, read_to_string};
 use anyhow::{anyhow, Context, Result};
 use log::{debug, error, info};
 use lsp_types::Url;
@@ -110,14 +111,12 @@ impl ParsedFile {
     }
 
     pub fn define_type(
+        state: &mut MutexGuard<'_, &mut SessionState>,
         parsed_file: Arc<Mutex<ParsedFile>>,
+        parsed_file_lock: &mut MutexGuard<'_, ParsedFile>,
         namespace: String,
-        state: SessionStateArc,
     ) -> Result<()> {
         debug!("Defining the type of a file.");
-        let mut state = lock_mutex(&state)?;
-        let mut parsed_file_lock = lock_mutex(&parsed_file)?;
-        debug!("Locked the mutexes. File: {}", parsed_file_lock.path);
         if let Some(tree) = &parsed_file_lock.tree {
             debug!("File has a tree, continuing...");
             let tree = tree.clone();
@@ -156,7 +155,7 @@ impl ParsedFile {
                         }
                         "function_definition" => {
                             debug!("It's a function definition. Parsing.");
-                            let fn_sig = function_signature(&parsed_file_lock, child)?;
+                            let fn_sig = function_signature(parsed_file_lock, child)?;
                             debug!("Got signature for {}", fn_sig.name);
                             let qualified_name = if !namespace.is_empty() {
                                 namespace + "." + fn_sig.name.as_str()

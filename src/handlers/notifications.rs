@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 use crate::analysis::defref;
 use crate::parsed_file::{FileType, ParsedFile};
 use crate::types::{Range, Workspace};
-use crate::utils::{lock_mutex, read_to_string, SessionStateArc};
+use crate::utils::{lock_mutex, read_to_string, rescan_file, SessionStateArc};
 
 use anyhow::{anyhow, Result};
 use itertools::Itertools;
@@ -98,6 +98,15 @@ fn handle_text_document_did_open(
     let mut lock = lock_mutex(&state)?;
     let contents = read_to_string(&mut params.text_document.text.as_bytes(), None)?.0;
     let path = params.text_document.uri.path().to_string();
+    if let Some(file) = lock.files.get(&path) {
+        let mut lock_file = lock_mutex(file)?;
+        lock_file.open = true;
+        lock_file.contents = contents;
+        drop(lock_file);
+        let file = Arc::clone(file);
+        rescan_file(&mut lock, file)?;
+        return Ok(None);
+    }
     let path_p = Path::new(&path);
     let mut scope = String::new();
     for segment in path_p.iter() {
@@ -145,9 +154,14 @@ fn handle_text_document_did_open(
         "".to_string()
     };
     defref::analyze(&lock, Arc::clone(&parsed_file))?;
+    let mut file_lock = lock_mutex(&parsed_file)?;
     lock.files.insert(key.clone(), Arc::clone(&parsed_file));
-    drop(lock);
-    ParsedFile::define_type(Arc::clone(&parsed_file), namespace, Arc::clone(&state))?;
+    ParsedFile::define_type(
+        &mut lock,
+        Arc::clone(&parsed_file),
+        &mut file_lock,
+        namespace,
+    )?;
     debug!("Inserted {key} into the store");
     Ok(None)
 }
@@ -162,22 +176,15 @@ fn handle_text_document_did_close(
     );
     let path = params.text_document.uri.path();
     if params.text_document.uri.scheme() == "file" && std::path::Path::new(path).exists() {
-        let parsed_file = ParsedFile::parse_file(path.into())?;
-        let parsed_file = Arc::new(Mutex::new(parsed_file));
-        let namespace = if let Some(segments) = params.text_document.uri.path_segments() {
-            segments
-                .map(|s| s.to_string())
-                .filter(|s| s.starts_with('+') || s.starts_with('@'))
-                .flat_map(|s| s.strip_prefix(|f| f == '+' || f == '@').map(String::from))
-                .join(".")
-        } else {
-            "".into()
-        };
-        ParsedFile::define_type(Arc::clone(&parsed_file), namespace, Arc::clone(&state))?;
-        lock_mutex(&state)?.files.insert(
-            lock_mutex(&parsed_file)?.path.clone(),
-            Arc::clone(&parsed_file),
-        );
+        let mut state_lock = lock_mutex(&state)?;
+        if let Some(file) = state_lock.files.get(&path.to_string()) {
+            let mut lock_file = lock_mutex(file)?;
+            lock_file.open = false;
+            drop(lock_file);
+            let file = Arc::clone(file);
+            rescan_file(&mut state_lock, file)?;
+            state_lock.rescan_all_files = true;
+        }
     } else {
         lock_mutex(&state)?
             .files
@@ -227,9 +234,9 @@ fn handle_text_document_did_change(
             None => lock_mutex(&parsed_file)?.contents = change.text,
         }
     }
-    lock_mutex(&parsed_file)?.parse()?;
-    let lock = lock_mutex(&state)?;
-    defref::analyze(&lock, Arc::clone(&parsed_file))?;
+    let mut lock = lock_mutex(&state)?;
+    rescan_file(&mut lock, parsed_file)?;
+    lock.rescan_open_files = true;
     Ok(None)
 }
 
@@ -242,7 +249,7 @@ fn handle_text_document_did_save(
         params.text_document.uri.as_str(),
     );
     let file_path = params.text_document.uri.path().to_string();
-    let lock = lock_mutex(&state)?;
+    let mut lock = lock_mutex(&state)?;
     let parsed_file = lock
         .files
         .get(&file_path)
@@ -251,10 +258,10 @@ fn handle_text_document_did_save(
     if let Some(content) = params.text {
         let mut parsed_file_lock = lock_mutex(&parsed_file)?;
         parsed_file_lock.contents = content;
-        parsed_file_lock.parse()?;
         drop(parsed_file_lock);
-        defref::analyze(&lock, Arc::clone(&parsed_file))?;
+        rescan_file(&mut lock, parsed_file)?;
     }
+    lock.rescan_all_files = true;
     Ok(None)
 }
 
