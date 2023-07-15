@@ -303,7 +303,7 @@ fn handle_hover(
     id: RequestId,
     params: HoverParams,
 ) -> Result<Option<ExitCode>> {
-    info!("Received textDocument/references.");
+    info!("Received textDocument/hover.");
     let lock = lock_mutex(&state)?;
     let path = params
         .text_document_position_params
@@ -346,7 +346,7 @@ fn handle_highlight(
     id: RequestId,
     params: DocumentHighlightParams,
 ) -> Result<Option<ExitCode>> {
-    info!("Received textDocument/references.");
+    info!("Received textDocument/highlight.");
     let lock = lock_mutex(&state)?;
     let path = params
         .text_document_position_params
@@ -375,6 +375,8 @@ fn handle_shutdown(state: SessionStateArc, id: RequestId, _params: ()) -> Result
     info!("Received shutdown request.");
     let mut state = lock_mutex(&state)?;
     state.client_requested_shutdown = true;
+    state.rescan_all_files = false;
+    state.rescan_open_files = false;
     let resp = Response::new_ok(id, ());
     let _ = state.sender.send(resp.into());
     Ok(None)

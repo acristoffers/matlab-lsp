@@ -21,7 +21,7 @@ use std::sync::{Arc, Mutex};
 use crate::types::Workspace;
 
 use self::session_state::SessionState;
-use self::utils::SessionStateArc;
+use self::utils::{lock_mutex, SessionStateArc};
 use args::{Arguments, Parser};
 use crossbeam_channel::Receiver;
 use handlers::{handle_notification, handle_request};
@@ -146,6 +146,11 @@ fn main_loop(
         if let Some(pid) = pid {
             let pid = Pid::from(pid);
             if let process_alive::State::Dead = process_alive::state(pid) {
+                let mut lock = lock_mutex(&state)?;
+                info!("Editor is dead, leaving.");
+                lock.client_requested_shutdown = true;
+                lock.rescan_open_files = false;
+                lock.rescan_all_files = false;
                 break;
             }
         }

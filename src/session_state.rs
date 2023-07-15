@@ -46,6 +46,7 @@ impl SessionState {
                 drop(lock);
                 std::thread::sleep(std::time::Duration::from_secs(1));
             }
+            debug!("Leaving worker thread.");
             Ok(())
         });
         Ok(handle)

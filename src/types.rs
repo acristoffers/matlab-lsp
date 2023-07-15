@@ -10,7 +10,6 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use anyhow::{anyhow, Context};
 use crossbeam_channel::Sender;
-use log::debug;
 use lsp_server::Message;
 use lsp_types::{InitializeParams, Position};
 use tree_sitter::{Point, Tree};
@@ -225,10 +224,6 @@ impl Range {
     }
 
     pub fn contains(&self, other: Point) -> bool {
-        debug!(
-            "Checking if {self} contains ({}, {})",
-            other.row, other.column
-        );
         self.start.row <= other.row
             && other.row <= self.end.row
             && self.start.column <= other.column
