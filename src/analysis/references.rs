@@ -31,24 +31,32 @@ pub fn find_references_to_symbol<'a>(
         if r_lock.loc.contains(loc) {
             let target = r_lock.target.clone();
             match &target {
-                crate::types::ReferenceTarget::Class(c) => {
+                ReferenceTarget::Class(c) => {
                     drop(r_lock);
                     drop(file_lock);
                     return find_references_to_class(state, Arc::clone(c), inc_dec);
                 }
-                crate::types::ReferenceTarget::Function(f) => {
+                ReferenceTarget::Function(f) => {
                     drop(r_lock);
                     drop(file_lock);
                     return find_references_to_function(state, Arc::clone(f), inc_dec);
                 }
-                crate::types::ReferenceTarget::Script(f) => {
+                ReferenceTarget::Script(f) => {
                     drop(r_lock);
                     drop(file_lock);
                     return find_references_to_script(state, Arc::clone(f));
                 }
-                crate::types::ReferenceTarget::Variable(v) => {
+                ReferenceTarget::Variable(v) => {
                     drop(r_lock);
                     return find_references_to_variable(&file_lock, Arc::clone(v), inc_dec);
+                }
+                ReferenceTarget::UnknownVariable => {
+                    let name = r_lock.name.clone();
+                    drop(r_lock);
+                    if name.contains('.') {
+                        return find_references_to_field(&file_lock, name, loc);
+                    }
+                    return Ok(vec![]);
                 }
                 _ => return Ok(vec![]),
             }
@@ -193,4 +201,62 @@ fn find_references_to_variable<'a>(
         refs.push(location);
     }
     Ok(refs)
+}
+
+fn find_references_to_field<'a>(
+    parsed_file: &'a MutexGuard<'a, ParsedFile>,
+    name: String,
+    pos: Point,
+) -> Result<Vec<Location>> {
+    let path = String::from("file://") + parsed_file.path.as_str();
+    let uri = Url::parse(path.as_str())?;
+    let mut rs = vec![];
+    if let Some(base_def) = base_definition(parsed_file, pos) {
+        for r in &parsed_file.workspace.references {
+            let r_lock = lock_mutex(r)?;
+            if r_lock.name == name {
+                let range = r_lock.loc;
+                let pos = r_lock.loc.start;
+                drop(r_lock);
+                if let Some(def) = base_definition(parsed_file, pos) {
+                    if Arc::ptr_eq(&base_def, &def) {
+                        let location = Location::new(uri.clone(), range.into());
+                        rs.push(location);
+                    }
+                }
+            }
+        }
+    }
+    Ok(rs)
+}
+
+fn base_definition(
+    parsed_file: &MutexGuard<'_, ParsedFile>,
+    pos: Point,
+) -> Option<Arc<Mutex<VariableDefinition>>> {
+    if let Some(tree) = &parsed_file.tree {
+        let root = tree.root_node();
+        if let Some(node) = root.descendant_for_point_range(pos, pos) {
+            if let Some(parent) = node.parent() {
+                let pos = parent.start_position();
+                for r in &parsed_file.workspace.references {
+                    if let Ok(r_lock) = lock_mutex(r) {
+                        if r_lock.loc.contains(pos) {
+                            if let ReferenceTarget::Variable(v) = &r_lock.target {
+                                return Some(Arc::clone(v));
+                            }
+                        }
+                    }
+                }
+                for d in &parsed_file.workspace.variables {
+                    if let Ok(d_lock) = lock_mutex(d) {
+                        if d_lock.loc.contains(pos) {
+                            return Some(Arc::clone(d));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
 }

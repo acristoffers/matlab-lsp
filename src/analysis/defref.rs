@@ -405,6 +405,7 @@ fn field_capture_impl(
     } else {
         false
     };
+    debug!("Is definition: {is_def}");
     if let Some(object) = node.child_by_field_name("object") {
         if object.kind() == "function_call" {
             if let Some(name_node) = object.child_by_field_name("name") {
@@ -482,11 +483,17 @@ fn field_capture_impl(
                 if let Some(v) = vref.last() {
                     let r = Arc::new(Mutex::new(v.clone()));
                     workspace.references.push(r);
-                    if i == 0 {
-                        continue;
-                    }
+                    continue;
+                } else {
+                    let reference = Reference {
+                        loc: field.range().into(),
+                        name: path.clone(),
+                        target: ReferenceTarget::UnknownVariable,
+                    };
+                    let reference = Arc::new(Mutex::new(reference));
+                    workspace.references.push(reference);
                 }
-                if i == fields.len().saturating_sub(1) {
+                if i == 0 || i == fields.len().saturating_sub(1) {
                     def_var(path, workspace, scopes, functions, *field)?;
                 }
             } else {
@@ -497,6 +504,7 @@ fn field_capture_impl(
                     is_pack = vref.first().is_none();
                 }
                 if is_pack {
+                    debug!("It's a package.");
                     // The base name is a package, so only packages, functions, classes and class
                     // folders are allowed here.
                     if let Some(ns) = current_ns.take() {
@@ -591,12 +599,14 @@ fn field_capture_impl(
                         return Ok(());
                     }
                 } else {
+                    debug!("It's a variable, not a package.");
                     // The base name is a variable, so act normal
                     let vs = ref_to_var(path.clone(), workspace, scopes, functions, *field)?;
                     if let Some(v) = vs.last() {
                         let v = Arc::new(Mutex::new(v.clone()));
                         workspace.references.push(v);
                     } else {
+                        debug!("Could not find definition for {path}.");
                         let vref = Reference {
                             loc: field.range().into(),
                             name: path.clone(),
