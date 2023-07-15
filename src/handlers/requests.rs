@@ -243,6 +243,7 @@ fn handle_references(
         .to_string();
     let loc = params.text_document_position.position.to_point();
     if let Ok(rs) = find_references_to_symbol(&lock, path, loc, include_declaration) {
+        let rs: Vec<&Location> = rs.iter().map(|(v, _)| v).collect();
         let result = serde_json::to_value(rs)?;
         let resp = Response::new_ok(id, result);
         let _ = lock.sender.send(resp.into());
