@@ -76,15 +76,19 @@ pub fn find_references_to_symbol<'a>(
     for f in file_lock.workspace.functions.values() {
         let f_lock = lock_mutex(f)?;
         if f_lock.loc.contains(loc) {
+            let function = Arc::clone(f);
             drop(f_lock);
-            return find_references_to_function(state, Arc::clone(f), inc_dec);
+            drop(file_lock);
+            return find_references_to_function(state, function, inc_dec);
         }
     }
     for c in file_lock.workspace.classes.values() {
         let c_lock = lock_mutex(c)?;
         if c_lock.loc.contains(loc) {
+            let class = Arc::clone(c);
             drop(c_lock);
-            return find_references_to_class(state, Arc::clone(c), inc_dec);
+            drop(file_lock);
+            return find_references_to_class(state, class, inc_dec);
         }
     }
     Ok(vec![])
