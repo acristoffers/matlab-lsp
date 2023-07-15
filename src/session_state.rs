@@ -67,9 +67,7 @@ impl SessionState {
     fn rescan_all_files(state: &mut MutexGuard<'_, &mut SessionState>) -> Result<()> {
         debug!("Rescanning open files.");
         state.workspace.classes.clear();
-        state.workspace.classfolders.clear();
         state.workspace.functions.clear();
-        state.workspace.namespaces.clear();
         state.workspace.references.clear();
         state.workspace.scripts.clear();
         state.workspace.variables.clear();
