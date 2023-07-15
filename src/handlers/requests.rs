@@ -4,6 +4,7 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
+use std::collections::HashMap;
 use std::process::ExitCode;
 use std::sync::Arc;
 
@@ -15,11 +16,12 @@ use crate::utils::{lock_mutex, SessionStateArc};
 use anyhow::{anyhow, Context, Result};
 use log::{debug, info};
 use lsp_server::{ExtractError, Message, Request, RequestId, Response};
-use lsp_types::request::{Formatting, GotoDefinition, References, Shutdown};
+use lsp_types::request::{Formatting, GotoDefinition, References, Rename, Shutdown};
 use lsp_types::{
     DocumentFormattingParams, GotoDefinitionParams, GotoDefinitionResponse, Location, Position,
-    ReferenceParams, TextEdit, Url,
+    ReferenceParams, RenameParams, TextEdit, Url, WorkspaceEdit,
 };
+use regex::Regex;
 use tree_sitter::Point;
 
 pub fn handle_request(state: SessionStateArc, request: &Request) -> Result<Option<ExitCode>> {
@@ -29,6 +31,7 @@ pub fn handle_request(state: SessionStateArc, request: &Request) -> Result<Optio
         .handle::<Formatting>(handle_formatting)?
         .handle::<GotoDefinition>(handle_goto_definition)?
         .handle::<References>(handle_references)?
+        .handle::<Rename>(handle_rename)?
         .handle::<Shutdown>(handle_shutdown)?
         .finish()
 }
@@ -240,6 +243,50 @@ fn handle_references(
         let resp = Response::new_err(id, 0, "Could not find file.".into());
         let _ = lock.sender.send(resp.into());
     }
+    Ok(None)
+}
+
+fn handle_rename(
+    state: SessionStateArc,
+    id: RequestId,
+    params: RenameParams,
+) -> Result<Option<ExitCode>> {
+    info!("Received textDocument/references.");
+    let lock = lock_mutex(&state)?;
+    let path = params
+        .text_document_position
+        .text_document
+        .uri
+        .path()
+        .to_string();
+    let loc = params.text_document_position.position.to_point();
+    let new_name = params.new_name;
+    let regex = Regex::new(r"^[a-zA-Z_][a-zA-Z_0-9]*$")?;
+    if !regex.is_match(&new_name) {
+        let resp = Response::new_err(
+            id,
+            lsp_server::ErrorCode::InvalidParams as i32,
+            "The name is not a valid identifier.".to_owned(),
+        );
+        lock.sender.send(Message::Response(resp))?;
+        return Ok(None);
+    }
+    let references = find_references_to_symbol(&lock, path, loc, true)?;
+    let mut ws_edit: HashMap<Url, Vec<TextEdit>> = HashMap::new();
+    for reference in references {
+        let uri = reference.uri;
+        let text_edit = TextEdit {
+            range: reference.range,
+            new_text: new_name.clone(),
+        };
+        ws_edit
+            .entry(uri)
+            .and_modify(|v| v.push(text_edit.clone()))
+            .or_insert(vec![text_edit]);
+    }
+    let ws_edit = WorkspaceEdit::new(ws_edit);
+    let resp = Response::new_ok(id, ws_edit);
+    lock.sender.send(Message::Response(resp))?;
     Ok(None)
 }
 
