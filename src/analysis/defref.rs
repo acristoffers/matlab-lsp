@@ -187,10 +187,19 @@ fn analyze_impl(
             "identifier" => {
                 debug!("Defining identifier reference.");
                 if let Some(parent) = node.parent() {
-                    if parent.kind() == "field_expression" || parent.kind() == "function_definition"
+                    if parent.kind() == "field_expression"
+                        || parent.kind() == "function_definition"
+                        || parent.kind() == "multioutput_variable"
                     {
                         debug!("Node is part of something greater, leaving.");
                         continue;
+                    }
+                    if parent.kind() == "assignment" {
+                        if let Some(left) = parent.child_by_field_name("left") {
+                            if left.id() == node.id() {
+                                continue;
+                            }
+                        }
                     }
                 }
                 if !workspace

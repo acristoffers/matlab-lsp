@@ -1,10 +1,7 @@
 (function_definition) @fndef
 (lambda) @fndef
 
-(assignment left: (function_call (identifier) @varref))
-(assignment left: (identifier) @varref)
 (assignment right: (identifier) @varref)
-(multioutput_variable (function_call (identifier) @varref))
 
 (assignment left: (function_call (identifier) @vardef))
 (assignment left: (identifier) @vardef)

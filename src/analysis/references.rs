@@ -21,6 +21,7 @@ pub fn find_references_to_symbol<'a>(
     state: &'a MutexGuard<'a, &mut SessionState>,
     path: String,
     loc: Point,
+    inc_dec: bool,
 ) -> Result<Vec<Location>> {
     debug!("Listing references.");
     let file = state.files.get(&path).ok_or(code_loc!("No such file."))?;
@@ -33,12 +34,12 @@ pub fn find_references_to_symbol<'a>(
                 crate::types::ReferenceTarget::Class(c) => {
                     drop(r_lock);
                     drop(file_lock);
-                    return find_references_to_class(state, Arc::clone(c));
+                    return find_references_to_class(state, Arc::clone(c), inc_dec);
                 }
                 crate::types::ReferenceTarget::Function(f) => {
                     drop(r_lock);
                     drop(file_lock);
-                    return find_references_to_function(state, Arc::clone(f));
+                    return find_references_to_function(state, Arc::clone(f), inc_dec);
                 }
                 crate::types::ReferenceTarget::Script(f) => {
                     drop(r_lock);
@@ -47,7 +48,7 @@ pub fn find_references_to_symbol<'a>(
                 }
                 crate::types::ReferenceTarget::Variable(v) => {
                     drop(r_lock);
-                    return find_references_to_variable(&file_lock, Arc::clone(v));
+                    return find_references_to_variable(&file_lock, Arc::clone(v), inc_dec);
                 }
                 _ => return Ok(vec![]),
             }
@@ -57,21 +58,21 @@ pub fn find_references_to_symbol<'a>(
         let v_lock = lock_mutex(v)?;
         if v_lock.loc.contains(loc) {
             drop(v_lock);
-            return find_references_to_variable(&file_lock, Arc::clone(v));
+            return find_references_to_variable(&file_lock, Arc::clone(v), inc_dec);
         }
     }
     for f in file_lock.workspace.functions.values() {
         let f_lock = lock_mutex(f)?;
         if f_lock.loc.contains(loc) {
             drop(f_lock);
-            return find_references_to_function(state, Arc::clone(f));
+            return find_references_to_function(state, Arc::clone(f), inc_dec);
         }
     }
     for c in file_lock.workspace.classes.values() {
         let c_lock = lock_mutex(c)?;
         if c_lock.loc.contains(loc) {
             drop(c_lock);
-            return find_references_to_class(state, Arc::clone(c));
+            return find_references_to_class(state, Arc::clone(c), inc_dec);
         }
     }
     Ok(vec![])
@@ -80,6 +81,7 @@ pub fn find_references_to_symbol<'a>(
 fn find_references_to_class<'a>(
     state: &'a MutexGuard<'a, &mut SessionState>,
     class: Arc<Mutex<ClassDefinition>>,
+    inc_dec: bool,
 ) -> Result<Vec<Location>> {
     let mut refs = vec![];
     for (path, file) in &state.files {
@@ -97,12 +99,23 @@ fn find_references_to_class<'a>(
             }
         }
     }
+    if inc_dec {
+        let v_lock = lock_mutex(&class)?;
+        let v_file_lock = lock_mutex(&v_lock.parsed_file)?;
+        let path = v_file_lock.path.clone();
+        let path = String::from("file://") + path.as_str();
+        let uri = Url::parse(path.as_str())?;
+        let loc = v_lock.loc;
+        let location = Location::new(uri.clone(), loc.into());
+        refs.push(location);
+    }
     Ok(refs)
 }
 
 fn find_references_to_function<'a>(
     state: &'a MutexGuard<'a, &mut SessionState>,
     function: Arc<Mutex<FunctionDefinition>>,
+    inc_dec: bool,
 ) -> Result<Vec<Location>> {
     let mut refs = vec![];
     for (path, file) in &state.files {
@@ -119,6 +132,16 @@ fn find_references_to_function<'a>(
                 }
             }
         }
+    }
+    if inc_dec {
+        let v_lock = lock_mutex(&function)?;
+        let v_file_lock = lock_mutex(&v_lock.parsed_file)?;
+        let path = v_file_lock.path.clone();
+        let path = String::from("file://") + path.as_str();
+        let uri = Url::parse(path.as_str())?;
+        let loc = v_lock.loc;
+        let location = Location::new(uri.clone(), loc.into());
+        refs.push(location);
     }
     Ok(refs)
 }
@@ -149,6 +172,7 @@ fn find_references_to_script<'a>(
 fn find_references_to_variable<'a>(
     parsed_file: &'a MutexGuard<'a, ParsedFile>,
     variable: Arc<Mutex<VariableDefinition>>,
+    inc_dec: bool,
 ) -> Result<Vec<Location>> {
     let path = String::from("file://") + parsed_file.path.as_str();
     let uri = Url::parse(path.as_str())?;
@@ -161,6 +185,12 @@ fn find_references_to_variable<'a>(
                 refs.push(location);
             }
         }
+    }
+    if inc_dec {
+        let v_lock = lock_mutex(&variable)?;
+        let loc = v_lock.loc;
+        let location = Location::new(uri.clone(), loc.into());
+        refs.push(location);
     }
     Ok(refs)
 }
