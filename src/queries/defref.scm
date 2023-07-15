@@ -1,8 +1,6 @@
 (function_definition) @fndef
 (lambda) @fndef
 
-(assignment right: (identifier) @varref)
-
 (assignment left: (function_call (identifier) @vardef))
 (assignment left: (identifier) @vardef)
 (catch_clause (identifier) @vardef)

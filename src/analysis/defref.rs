@@ -134,7 +134,7 @@ fn analyze_impl(
         let name = node.utf8_text(parsed_file.contents.as_bytes())?.to_string();
         debug!("Got node {name}.");
         match capture.as_str() {
-            "vardef" => def_var(name, &mut workspace, &scopes, &mut functions, *node),
+            "vardef" => def_var(name, &mut workspace, &scopes, &mut functions, *node)?,
             "command" => command_capture_impl(
                 name,
                 &mut workspace,
@@ -152,38 +152,6 @@ fn analyze_impl(
                 node,
                 parsed_file,
             )?,
-            "varref" => {
-                debug!("Defining reference.");
-                let mut vs = vec![];
-                for vref in
-                    ref_to_var(name.clone(), &mut workspace, &scopes, &mut functions, *node)?
-                {
-                    if let ReferenceTarget::Variable(v) = vref.target.clone() {
-                        if let Some(parent) = parent_of_kind("assignment", *node) {
-                            let v_lock = lock_mutex(&v)?;
-                            if !Range::from(parent.range()).fully_contains(v_lock.loc) {
-                                vs.push(vref);
-                            } else {
-                                debug!("Reference already exists.");
-                            }
-                        } else {
-                            vs.push(vref);
-                        }
-                    }
-                }
-                if let Some(v) = vs.first() {
-                    let vref = Arc::new(Mutex::new(v.clone()));
-                    workspace.references.push(vref);
-                } else {
-                    let vref = Reference {
-                        loc: node.range().into(),
-                        name,
-                        target: ReferenceTarget::UnknownVariable,
-                    };
-                    let vref = Arc::new(Mutex::new(vref));
-                    workspace.references.push(vref);
-                }
-            }
             "identifier" => {
                 debug!("Defining identifier reference.");
                 if let Some(parent) = node.parent() {
@@ -285,7 +253,7 @@ fn command_capture_impl(
                     .skip(1)
                 {
                     let varname = arg.utf8_text(parsed_file.contents.as_bytes())?.to_string();
-                    def_var(varname, workspace, scopes, functions, arg);
+                    def_var(varname, workspace, scopes, functions, arg)?;
                 }
             }
         }
@@ -460,7 +428,7 @@ fn field_capture_impl(
                             workspace.references.push(r);
                         }
                         if is_def {
-                            def_var(name, workspace, scopes, functions, name_node);
+                            def_var(name, workspace, scopes, functions, name_node)?;
                         }
                     }
                 }
@@ -511,14 +479,16 @@ fn field_capture_impl(
             if is_def {
                 // Definitions can shadow namespaces, so we don't care about namespaces here.
                 let vref = ref_to_var(path.clone(), workspace, scopes, functions, *field)?;
-                if let Some(v) = vref.first() {
+                if let Some(v) = vref.last() {
                     let r = Arc::new(Mutex::new(v.clone()));
                     workspace.references.push(r);
                     if i == 0 {
                         continue;
                     }
                 }
-                def_var(path, workspace, scopes, functions, *field);
+                if i == fields.len().saturating_sub(1) {
+                    def_var(path, workspace, scopes, functions, *field)?;
+                }
             } else {
                 // If it is not a definition, it can be a namespace
                 // But we first need to make sure it is not a variable.
@@ -623,7 +593,7 @@ fn field_capture_impl(
                 } else {
                     // The base name is a variable, so act normal
                     let vs = ref_to_var(path.clone(), workspace, scopes, functions, *field)?;
-                    if let Some(v) = vs.first() {
+                    if let Some(v) = vs.last() {
                         let v = Arc::new(Mutex::new(v.clone()));
                         workspace.references.push(v);
                     } else {
@@ -700,18 +670,23 @@ fn ref_to_var(
             }
         }
     }
-    for v in workspace.variables.iter().rev() {
-        let v_lock = lock_mutex(v)?;
-        if v_lock.name == name {
-            if is_assignment && p_range.fully_contains(v_lock.loc) {
-                continue;
+    // If scope is not empty, we cannot look at the global workspace as this is a private function
+    // of a script, and therefore scoped. If this is a nested function, everything it can see was
+    // covered alread in the previous for loop.
+    if scopes.is_empty() {
+        for v in workspace.variables.iter().rev() {
+            let v_lock = lock_mutex(v)?;
+            if v_lock.name == name {
+                if is_assignment && p_range.fully_contains(v_lock.loc) {
+                    continue;
+                }
+                let r = Reference {
+                    loc: node.range().into(),
+                    name: name.clone(),
+                    target: ReferenceTarget::Variable(Arc::clone(v)),
+                };
+                references.push(r);
             }
-            let r = Reference {
-                loc: node.range().into(),
-                name: name.clone(),
-                target: ReferenceTarget::Variable(Arc::clone(v)),
-            };
-            references.push(r);
         }
     }
     Ok(references)
@@ -794,8 +769,48 @@ fn def_var(
     scopes: &[usize],
     functions: &mut HashMap<usize, (Node, Workspace)>,
     node: Node,
-) {
+) -> Result<()> {
     debug!("Defining variable {name}");
+    let mut cursor = node.walk();
+    // If it is a variable definition inside a function which has an output argument of same name,
+    // point to that instead of creating a new definition.
+    if let Some(parent) = parent_function(node) {
+        if let Some(output) = parent
+            .named_children(&mut cursor)
+            .find(|n| n.kind() == "function_output")
+        {
+            let mut ps = vec![];
+            if let Some(output) = output.named_child(0) {
+                if output.kind() == "identifier" {
+                    ps.push(output.start_position());
+                } else if output.kind() == "multioutput_variable" {
+                    let mut cursor = output.walk();
+                    for output in output.named_children(&mut cursor) {
+                        ps.push(output.start_position());
+                    }
+                }
+            }
+            for p in ps {
+                if let Some(scope) = scopes.last() {
+                    if let Some((_, ws)) = functions.get(scope) {
+                        for var in &ws.variables {
+                            let v_lock = lock_mutex(var)?;
+                            if v_lock.name == name && v_lock.loc.contains(p) {
+                                let reference = Reference {
+                                    loc: node.range().into(),
+                                    name,
+                                    target: ReferenceTarget::Variable(Arc::clone(var)),
+                                };
+                                let referece = Arc::new(Mutex::new(reference));
+                                workspace.references.push(referece);
+                                return Ok(());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
     let definition = VariableDefinition {
         loc: node.range().into(),
         name: name.clone(),
@@ -808,6 +823,7 @@ fn def_var(
     } else {
         workspace.variables.push(definition);
     }
+    Ok(())
 }
 
 fn pkg_basename(s: String) -> (String, String) {
