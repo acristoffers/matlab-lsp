@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::process::ExitCode;
 use std::sync::Arc;
 
+use crate::analysis::hover::hover_for_symbol;
 use crate::analysis::references::find_references_to_symbol;
 use crate::code_loc;
 use crate::types::{PosToPoint, Range};
@@ -16,10 +17,11 @@ use crate::utils::{lock_mutex, SessionStateArc};
 use anyhow::{anyhow, Context, Result};
 use log::{debug, info};
 use lsp_server::{ExtractError, Message, Request, RequestId, Response};
-use lsp_types::request::{Formatting, GotoDefinition, References, Rename, Shutdown};
+use lsp_types::request::{Formatting, GotoDefinition, HoverRequest, References, Rename, Shutdown};
 use lsp_types::{
-    DocumentFormattingParams, GotoDefinitionParams, GotoDefinitionResponse, Location, Position,
-    ReferenceParams, RenameParams, TextEdit, Url, WorkspaceEdit,
+    DocumentFormattingParams, GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents,
+    HoverParams, Location, MarkupKind, Position, ReferenceParams, RenameParams, TextEdit, Url,
+    WorkspaceEdit,
 };
 use regex::Regex;
 use tree_sitter::Point;
@@ -32,6 +34,7 @@ pub fn handle_request(state: SessionStateArc, request: &Request) -> Result<Optio
         .handle::<GotoDefinition>(handle_goto_definition)?
         .handle::<References>(handle_references)?
         .handle::<Rename>(handle_rename)?
+        .handle::<HoverRequest>(handle_hover)?
         .handle::<Shutdown>(handle_shutdown)?
         .finish()
 }
@@ -287,6 +290,49 @@ fn handle_rename(
     let ws_edit = WorkspaceEdit::new(ws_edit);
     let resp = Response::new_ok(id, ws_edit);
     lock.sender.send(Message::Response(resp))?;
+    Ok(None)
+}
+
+fn handle_hover(
+    state: SessionStateArc,
+    id: RequestId,
+    params: HoverParams,
+) -> Result<Option<ExitCode>> {
+    info!("Received textDocument/references.");
+    let lock = lock_mutex(&state)?;
+    let path = params
+        .text_document_position_params
+        .text_document
+        .uri
+        .path()
+        .to_string();
+    let loc = params.text_document_position_params.position.to_point();
+    if let Some((md, plain)) = hover_for_symbol(&lock, path, loc)? {
+        if let Some(td) = &lock.workspace_params.capabilities.text_document {
+            if let Some(hover) = &td.hover {
+                if let Some(cf) = &hover.content_format {
+                    if cf.contains(&MarkupKind::Markdown) {
+                        let response = Hover {
+                            contents: HoverContents::Markup(md),
+                            range: None,
+                        };
+                        let resp = Response::new_ok(id, response);
+                        lock.sender.send(Message::Response(resp))?;
+                        return Ok(None);
+                    }
+                }
+            }
+        }
+        let response = Hover {
+            contents: HoverContents::Markup(plain),
+            range: None,
+        };
+        let resp = Response::new_ok(id, response);
+        lock.sender.send(Message::Response(resp))?;
+    } else {
+        let resp = Response::new_ok(id, ());
+        lock.sender.send(Message::Response(resp))?;
+    }
     Ok(None)
 }
 

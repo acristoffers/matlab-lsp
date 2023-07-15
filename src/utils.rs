@@ -12,6 +12,7 @@ use crate::parsed_file::{FunctionSignature, ParsedFile};
 use crate::session_state::SessionState;
 
 use anyhow::{anyhow, Result};
+use itertools::Itertools;
 use log::debug;
 use tree_sitter::Node;
 
@@ -222,6 +223,15 @@ pub fn function_signature(
         vargin = vargin_count > 0;
         argin -= vargin_count;
     }
+    let doc: String = node
+        .named_children(&mut cursor)
+        .skip_while(|n| n.kind() != "comment")
+        .take(1)
+        .flat_map(|n| n.utf8_text(parsed_file.contents.as_bytes()))
+        .flat_map(|s| s.split('\n'))
+        .map(|s| s.trim().to_string())
+        .map(|s| s.strip_prefix('%').unwrap_or(s.as_str()).to_string())
+        .join("\n");
     let function = FunctionSignature {
         name_range: name_range.into(),
         name,
@@ -232,6 +242,7 @@ pub fn function_signature(
         argout_names,
         argin_names,
         vargin_names,
+        documentation: doc,
     };
     Ok(function)
 }

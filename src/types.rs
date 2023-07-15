@@ -76,6 +76,7 @@ pub struct FunctionSignature {
     pub argout_names: Vec<String>,
     pub argin_names: Vec<String>,
     pub vargin_names: Vec<String>,
+    pub documentation: String,
 }
 
 #[derive(Debug, Clone, Default)]

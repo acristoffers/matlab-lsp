@@ -6,3 +6,4 @@
 
 pub mod defref;
 pub mod references;
+pub mod hover;

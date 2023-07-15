@@ -19,7 +19,6 @@ use std::process::ExitCode;
 use std::sync::{Arc, Mutex};
 
 use crate::types::Workspace;
-use crate::utils::lock_mutex;
 
 use self::session_state::SessionState;
 use self::utils::SessionStateArc;
@@ -31,8 +30,8 @@ use anyhow::Result;
 use log::{debug, error, info};
 use lsp_server::{Connection, Message};
 use lsp_types::{
-    OneOf, PositionEncodingKind, TextDocumentSyncCapability, TextDocumentSyncKind,
-    TextDocumentSyncOptions,
+    HoverProviderCapability, OneOf, PositionEncodingKind, TextDocumentSyncCapability,
+    TextDocumentSyncKind, TextDocumentSyncOptions,
 };
 use lsp_types::{SaveOptions, ServerCapabilities};
 use process_alive::Pid;
@@ -101,6 +100,7 @@ fn start_server(arguments: Arguments) -> Result<ExitCode> {
         definition_provider: Some(OneOf::Left(true)),
         references_provider: Some(OneOf::Left(true)),
         rename_provider: Some(OneOf::Left(true)),
+        hover_provider: Some(HoverProviderCapability::Simple(true)),
         ..Default::default()
     })?;
     let initialization_params = connection.initialize(server_capabilities)?;
@@ -124,8 +124,6 @@ fn start_server(arguments: Arguments) -> Result<ExitCode> {
     let handle = SessionState::start_worker(Arc::clone(&state_arc))?;
     let result = main_loop(Arc::clone(&state_arc), &connection.receiver, pid);
     debug!("Left main loop. Joining threads and shutting down.");
-    // info!("files: {:?}", lock_mutex(&state_arc).unwrap().files);
-    info!("workspace: {:?}", lock_mutex(&state_arc).unwrap().workspace);
     match handle.join() {
         Err(err) => {
             error!("Thread paniced? {:?}", err.downcast_ref::<String>());

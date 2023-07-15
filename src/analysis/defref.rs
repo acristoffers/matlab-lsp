@@ -646,7 +646,7 @@ fn parent_function(node: Node) -> Option<Node> {
     }
 }
 
-fn parent_of_kind<S: Into<String>>(kind: S, node: Node) -> Option<Node> {
+pub fn parent_of_kind<S: Into<String>>(kind: S, node: Node) -> Option<Node> {
     let kind: String = kind.into();
     let mut node = node;
     loop {
