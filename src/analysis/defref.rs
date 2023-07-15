@@ -517,6 +517,7 @@ fn field_capture_impl(
                                 debug!("Looking for function {path}");
                                 // This is a function call, so look for functions and classes.
                                 if let Some(f_def) = state.workspace.functions.get(&path) {
+                                    debug!("Got function for {path}.");
                                     let vref = Reference {
                                         loc: field.range().into(),
                                         name: path,
@@ -525,6 +526,7 @@ fn field_capture_impl(
                                     let vref = Arc::new(Mutex::new(vref));
                                     workspace.references.push(vref);
                                 } else if let Some(c_def) = state.workspace.classes.get(&path) {
+                                    debug!("Got class for {path}.");
                                     let vref = Reference {
                                         loc: field.range().into(),
                                         name: path,
@@ -533,6 +535,7 @@ fn field_capture_impl(
                                     let vref = Arc::new(Mutex::new(vref));
                                     workspace.references.push(vref);
                                 } else {
+                                    debug!("Unknown function for path {path}");
                                     let vref = Reference {
                                         loc: field.range().into(),
                                         name: path,
@@ -548,6 +551,13 @@ fn field_capture_impl(
                                 debug!("Not a function/class. Subpackage?");
                                 if let Some(ws) = ws {
                                     debug!("Yep, subpackage.");
+                                    let vref = Reference {
+                                        loc: field.range().into(),
+                                        name: path,
+                                        target: ReferenceTarget::Namespace(ws.clone()),
+                                    };
+                                    let vref = Arc::new(Mutex::new(vref));
+                                    workspace.references.push(vref);
                                     current_ns = Some(Arc::clone(ws));
                                 } else if let Some(cf) = cf {
                                     debug!("Nope, packaged class.");
@@ -574,7 +584,7 @@ fn field_capture_impl(
                             return Err(code_loc!("Node has no parent."));
                         }
                     } else if let Some(ns) = state.workspace.namespaces.get(name) {
-                        debug!("First packages found: {name}");
+                        debug!("First package found: {name}");
                         let vref = Reference {
                             loc: field.range().into(),
                             name: path,

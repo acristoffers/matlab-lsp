@@ -13,7 +13,7 @@ use tree_sitter::Point;
 
 use crate::code_loc;
 use crate::parsed_file::ParsedFile;
-use crate::session_state::SessionState;
+use crate::session_state::{Namespace, SessionState};
 use crate::types::{ClassDefinition, FunctionDefinition, ReferenceTarget, VariableDefinition};
 use crate::utils::lock_mutex;
 
@@ -57,6 +57,10 @@ pub fn find_references_to_symbol<'a>(
                         return find_references_to_field(&file_lock, name, loc);
                     }
                     return Ok(vec![]);
+                }
+                ReferenceTarget::Namespace(ns) => {
+                    drop(r_lock);
+                    return find_references_to_namespace(&file_lock, Arc::clone(ns));
                 }
                 _ => return Ok(vec![]),
             }
@@ -199,6 +203,25 @@ fn find_references_to_variable<'a>(
         let loc = v_lock.loc;
         let location = Location::new(uri.clone(), loc.into());
         refs.push(location);
+    }
+    Ok(refs)
+}
+
+fn find_references_to_namespace<'a>(
+    parsed_file: &'a MutexGuard<'a, ParsedFile>,
+    ns: Arc<Mutex<Namespace>>,
+) -> Result<Vec<Location>> {
+    let path = String::from("file://") + parsed_file.path.as_str();
+    let uri = Url::parse(path.as_str())?;
+    let mut refs = vec![];
+    for r in &parsed_file.workspace.references {
+        let r_lock = lock_mutex(r)?;
+        if let ReferenceTarget::Namespace(v) = &r_lock.target {
+            if Arc::ptr_eq(&ns, v) {
+                let location = Location::new(uri.clone(), r_lock.loc.into());
+                refs.push(location);
+            }
+        }
     }
     Ok(refs)
 }
