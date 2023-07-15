@@ -165,6 +165,7 @@ fn analyze_impl(
                     if parent.kind() == "assignment" {
                         if let Some(left) = parent.child_by_field_name("left") {
                             if left.id() == node.id() {
+                                debug!("Identifier in assignment left:, skipping.");
                                 continue;
                             }
                         }
@@ -176,14 +177,19 @@ fn analyze_impl(
                     .flat_map(|r| lock_mutex(r).map(|r| r.loc))
                     .any(|loc| loc == node.range().into())
                 {
+                    debug!("No references found at point.");
                     let mut vs = vec![];
                     for vref in
                         ref_to_var(name.clone(), &mut workspace, &scopes, &mut functions, *node)?
                     {
                         if let ReferenceTarget::Variable(v) = &vref.target {
                             if let Some(parent) = parent_of_kind("assignment", *node) {
-                                let v_lock = lock_mutex(v)?;
-                                if !Range::from(parent.range()).fully_contains(v_lock.loc) {
+                                if let Some(left) = parent.child_by_field_name("left") {
+                                    let v_lock = lock_mutex(v)?;
+                                    if !Range::from(left.range()).fully_contains(v_lock.loc) {
+                                        vs.push(vref.clone());
+                                    }
+                                } else {
                                     vs.push(vref.clone());
                                 }
                             } else {
@@ -670,11 +676,15 @@ fn ref_to_var(
 ) -> Result<Vec<Reference>> {
     let mut references = vec![];
     let (is_assignment, p_range) = if let Some(parent) = parent_of_kind("assignment", node) {
-        (true, parent.range().into())
+        if let Some(left) = parent.child_by_field_name("left") {
+            (true, left.range().into())
+        } else {
+            (false, Range::default())
+        }
     } else {
         (false, Range::default())
     };
-    for (_, ws) in scopes.iter().rev().flat_map(|i| functions.get(i)) {
+    for (_, ws) in scopes.iter().flat_map(|i| functions.get(i)) {
         for v in ws.variables.iter().rev() {
             let v_lock = lock_mutex(v)?;
             if v_lock.name == name {
@@ -754,7 +764,7 @@ fn ref_to_fn<'a>(
     pkg: bool,
 ) -> Result<Vec<Reference>> {
     let mut references = vec![];
-    for (_, ws) in scopes.iter().rev().flat_map(|i| functions.get(i)) {
+    for (_, ws) in scopes.iter().flat_map(|i| functions.get(i)) {
         for f in ws.functions.values() {
             let f_lock = lock_mutex(f)?;
             if f_lock.name == name {
@@ -811,7 +821,7 @@ fn def_var(
                 }
             }
             for p in ps {
-                if let Some(scope) = scopes.last() {
+                if let Some(scope) = scopes.first() {
                     if let Some((_, ws)) = functions.get(scope) {
                         for var in &ws.variables {
                             let v_lock = lock_mutex(var)?;
@@ -836,7 +846,7 @@ fn def_var(
         name: name.clone(),
     };
     let definition = Arc::new(Mutex::new(definition));
-    if let Some(scope) = scopes.last() {
+    if let Some(scope) = scopes.first() {
         if let Some((_, ws)) = functions.get_mut(scope) {
             ws.variables.push(definition);
         }
