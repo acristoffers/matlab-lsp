@@ -486,7 +486,7 @@ fn field_capture_impl(
             if is_def {
                 // Definitions can shadow namespaces, so we don't care about namespaces here.
                 let vref = ref_to_var(path.clone(), workspace, scopes, functions, *field)?;
-                if let Some(v) = vref.last() {
+                if let Some(v) = vref.first() {
                     let r = Arc::new(Mutex::new(v.clone()));
                     workspace.references.push(r);
                     continue;
@@ -618,7 +618,7 @@ fn field_capture_impl(
                     debug!("It's a variable, not a package.");
                     // The base name is a variable, so act normal
                     let vs = ref_to_var(path.clone(), workspace, scopes, functions, *field)?;
-                    if let Some(v) = vs.last() {
+                    if let Some(v) = vs.first() {
                         let v = Arc::new(Mutex::new(v.clone()));
                         workspace.references.push(v);
                     } else {
