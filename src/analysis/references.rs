@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use anyhow::{anyhow, Result};
 use log::debug;
-use lsp_types::{Location, Url};
+use lsp_types::{DocumentHighlightKind, Location, Url};
 use tree_sitter::Point;
 
 use crate::code_loc;
@@ -22,7 +22,7 @@ pub fn find_references_to_symbol<'a>(
     path: String,
     loc: Point,
     inc_dec: bool,
-) -> Result<Vec<Location>> {
+) -> Result<Vec<(Location, DocumentHighlightKind)>> {
     debug!("Listing references.");
     let file = state.files.get(&path).ok_or(code_loc!("No such file."))?;
     let file_lock = lock_mutex(file)?;
@@ -98,7 +98,7 @@ fn find_references_to_class<'a>(
     state: &'a MutexGuard<'a, &mut SessionState>,
     class: Arc<Mutex<ClassDefinition>>,
     inc_dec: bool,
-) -> Result<Vec<Location>> {
+) -> Result<Vec<(Location, DocumentHighlightKind)>> {
     let mut refs = vec![];
     for (path, file) in &state.files {
         let lock = lock_mutex(file)?;
@@ -110,7 +110,7 @@ fn find_references_to_class<'a>(
                     let path = String::from("file://") + r_path.as_str();
                     let uri = Url::parse(path.as_str())?;
                     let location = Location::new(uri.clone(), r_lock.loc.into());
-                    refs.push(location);
+                    refs.push((location, DocumentHighlightKind::TEXT));
                 }
             }
         }
@@ -123,7 +123,7 @@ fn find_references_to_class<'a>(
         let uri = Url::parse(path.as_str())?;
         let loc = v_lock.loc;
         let location = Location::new(uri.clone(), loc.into());
-        refs.push(location);
+        refs.push((location, DocumentHighlightKind::TEXT));
     }
     Ok(refs)
 }
@@ -132,7 +132,7 @@ fn find_references_to_function<'a>(
     state: &'a MutexGuard<'a, &mut SessionState>,
     function: Arc<Mutex<FunctionDefinition>>,
     inc_dec: bool,
-) -> Result<Vec<Location>> {
+) -> Result<Vec<(Location, DocumentHighlightKind)>> {
     let mut refs = vec![];
     for (path, file) in &state.files {
         let lock = lock_mutex(file)?;
@@ -144,7 +144,7 @@ fn find_references_to_function<'a>(
                     let path = String::from("file://") + r_path.as_str();
                     let uri = Url::parse(path.as_str())?;
                     let location = Location::new(uri.clone(), r_lock.loc.into());
-                    refs.push(location);
+                    refs.push((location, DocumentHighlightKind::TEXT));
                 }
             }
         }
@@ -157,7 +157,7 @@ fn find_references_to_function<'a>(
         let uri = Url::parse(path.as_str())?;
         let loc = v_lock.loc;
         let location = Location::new(uri.clone(), loc.into());
-        refs.push(location);
+        refs.push((location, DocumentHighlightKind::TEXT));
     }
     Ok(refs)
 }
@@ -165,7 +165,7 @@ fn find_references_to_function<'a>(
 fn find_references_to_script<'a>(
     state: &'a MutexGuard<'a, &mut SessionState>,
     script: Arc<Mutex<ParsedFile>>,
-) -> Result<Vec<Location>> {
+) -> Result<Vec<(Location, DocumentHighlightKind)>> {
     let mut refs = vec![];
     for (path, file) in &state.files {
         let lock = lock_mutex(file)?;
@@ -177,7 +177,7 @@ fn find_references_to_script<'a>(
                     let path = String::from("file://") + r_path.as_str();
                     let uri = Url::parse(path.as_str())?;
                     let location = Location::new(uri.clone(), r_lock.loc.into());
-                    refs.push(location);
+                    refs.push((location, DocumentHighlightKind::TEXT));
                 }
             }
         }
@@ -189,7 +189,7 @@ fn find_references_to_variable<'a>(
     parsed_file: &'a MutexGuard<'a, ParsedFile>,
     variable: Arc<Mutex<VariableDefinition>>,
     inc_dec: bool,
-) -> Result<Vec<Location>> {
+) -> Result<Vec<(Location, DocumentHighlightKind)>> {
     let path = String::from("file://") + parsed_file.path.as_str();
     let uri = Url::parse(path.as_str())?;
     let mut refs = vec![];
@@ -198,7 +198,7 @@ fn find_references_to_variable<'a>(
         if let ReferenceTarget::Variable(v) = &r_lock.target {
             if Arc::ptr_eq(&variable, v) {
                 let location = Location::new(uri.clone(), r_lock.loc.into());
-                refs.push(location);
+                refs.push((location, DocumentHighlightKind::READ));
             }
         }
     }
@@ -206,7 +206,7 @@ fn find_references_to_variable<'a>(
         let v_lock = lock_mutex(&variable)?;
         let loc = v_lock.loc;
         let location = Location::new(uri.clone(), loc.into());
-        refs.push(location);
+        refs.push((location, DocumentHighlightKind::WRITE));
     }
     Ok(refs)
 }
@@ -214,7 +214,7 @@ fn find_references_to_variable<'a>(
 fn find_references_to_namespace<'a>(
     parsed_file: &'a MutexGuard<'a, ParsedFile>,
     ns: Arc<Mutex<Namespace>>,
-) -> Result<Vec<Location>> {
+) -> Result<Vec<(Location, DocumentHighlightKind)>> {
     let path = String::from("file://") + parsed_file.path.as_str();
     let uri = Url::parse(path.as_str())?;
     let mut refs = vec![];
@@ -223,7 +223,7 @@ fn find_references_to_namespace<'a>(
         if let ReferenceTarget::Namespace(v) = &r_lock.target {
             if Arc::ptr_eq(&ns, v) {
                 let location = Location::new(uri.clone(), r_lock.loc.into());
-                refs.push(location);
+                refs.push((location, DocumentHighlightKind::TEXT));
             }
         }
     }
@@ -234,7 +234,7 @@ fn find_references_to_field<'a>(
     parsed_file: &'a MutexGuard<'a, ParsedFile>,
     name: String,
     pos: Point,
-) -> Result<Vec<Location>> {
+) -> Result<Vec<(Location, DocumentHighlightKind)>> {
     let path = String::from("file://") + parsed_file.path.as_str();
     let uri = Url::parse(path.as_str())?;
     let mut rs = vec![];
@@ -248,7 +248,7 @@ fn find_references_to_field<'a>(
                 if let Some(def) = base_definition(parsed_file, pos) {
                     if Arc::ptr_eq(&base_def, &def) {
                         let location = Location::new(uri.clone(), range.into());
-                        rs.push(location);
+                        rs.push((location, DocumentHighlightKind::WRITE));
                     }
                 }
             }

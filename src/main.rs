@@ -101,6 +101,7 @@ fn start_server(arguments: Arguments) -> Result<ExitCode> {
         references_provider: Some(OneOf::Left(true)),
         rename_provider: Some(OneOf::Left(true)),
         hover_provider: Some(HoverProviderCapability::Simple(true)),
+        document_highlight_provider: Some(OneOf::Left(true)),
         ..Default::default()
     })?;
     let initialization_params = connection.initialize(server_capabilities)?;

@@ -17,11 +17,14 @@ use crate::utils::{lock_mutex, SessionStateArc};
 use anyhow::{anyhow, Context, Result};
 use log::{debug, info};
 use lsp_server::{ExtractError, Message, Request, RequestId, Response};
-use lsp_types::request::{Formatting, GotoDefinition, HoverRequest, References, Rename, Shutdown};
+use lsp_types::request::{
+    DocumentHighlightRequest, Formatting, GotoDefinition, HoverRequest, References, Rename,
+    Shutdown,
+};
 use lsp_types::{
-    DocumentFormattingParams, GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents,
-    HoverParams, Location, MarkupKind, Position, ReferenceParams, RenameParams, TextEdit, Url,
-    WorkspaceEdit,
+    DocumentFormattingParams, DocumentHighlight, DocumentHighlightParams, GotoDefinitionParams,
+    GotoDefinitionResponse, Hover, HoverContents, HoverParams, Location, MarkupKind, Position,
+    ReferenceParams, RenameParams, TextEdit, Url, WorkspaceEdit,
 };
 use regex::Regex;
 use tree_sitter::Point;
@@ -35,6 +38,7 @@ pub fn handle_request(state: SessionStateArc, request: &Request) -> Result<Optio
         .handle::<References>(handle_references)?
         .handle::<Rename>(handle_rename)?
         .handle::<HoverRequest>(handle_hover)?
+        .handle::<DocumentHighlightRequest>(handle_highlight)?
         .handle::<Shutdown>(handle_shutdown)?
         .finish()
 }
@@ -276,7 +280,7 @@ fn handle_rename(
     }
     let references = find_references_to_symbol(&lock, path, loc, true)?;
     let mut ws_edit: HashMap<Url, Vec<TextEdit>> = HashMap::new();
-    for reference in references {
+    for (reference, _) in references {
         let uri = reference.uri;
         let text_edit = TextEdit {
             range: reference.range,
@@ -333,6 +337,36 @@ fn handle_hover(
         let resp = Response::new_ok(id, ());
         lock.sender.send(Message::Response(resp))?;
     }
+    Ok(None)
+}
+
+fn handle_highlight(
+    state: SessionStateArc,
+    id: RequestId,
+    params: DocumentHighlightParams,
+) -> Result<Option<ExitCode>> {
+    info!("Received textDocument/references.");
+    let lock = lock_mutex(&state)?;
+    let path = params
+        .text_document_position_params
+        .text_document
+        .uri
+        .path()
+        .to_string();
+    let loc = params.text_document_position_params.position.to_point();
+    let locs = find_references_to_symbol(&lock, path.clone(), loc, true)?;
+    let mut response = vec![];
+    for (location, kind) in locs {
+        if location.uri.path() == path {
+            let dh = DocumentHighlight {
+                range: location.range,
+                kind: Some(kind),
+            };
+            response.push(dh);
+        }
+    }
+    let resp = Response::new_ok(id, response);
+    lock.sender.send(Message::Response(resp))?;
     Ok(None)
 }
 
