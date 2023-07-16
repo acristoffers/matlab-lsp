@@ -8,3 +8,4 @@ pub mod defref;
 pub mod references;
 pub mod hover;
 pub mod semantic;
+pub mod diagnostics;

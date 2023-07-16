@@ -13,7 +13,7 @@ use log::{debug, error, info};
 use lsp_server::{Message, RequestId};
 use lsp_types::request::{Request, SemanticTokensRefresh};
 
-use crate::analysis::defref;
+use crate::analysis::{defref, diagnostics};
 use crate::code_loc;
 use crate::parsed_file::{FileType, ParsedFile};
 pub use crate::types::{ClassFolder, Namespace, SessionState};
@@ -60,8 +60,10 @@ impl SessionState {
             let file_lock = lock_mutex(file)?;
             if file_lock.open {
                 drop(file_lock);
-                let file = Arc::clone(file);
-                rescan_file(state, file)?;
+                let file2 = Arc::clone(file);
+                rescan_file(state, file2)?;
+                let mut file_lock = lock_mutex(file)?;
+                diagnostics::diagnotiscs(state, &mut file_lock)?;
             }
         }
         state.sender.send(Message::Request(lsp_server::Request {
