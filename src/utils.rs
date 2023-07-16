@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use crate::analysis::defref;
 use crate::parsed_file::{FunctionSignature, ParsedFile};
 use crate::session_state::SessionState;
+use crate::types::Range;
 
 use anyhow::{anyhow, Result};
 use itertools::Itertools;
@@ -127,6 +128,8 @@ pub fn function_signature(
         debug!("Could not find name.");
         return Err(anyhow!("Could not find function name"));
     };
+    let mut sig_range: Range = node.range().into();
+    sig_range.end = name_range.end_point;
     let mut cursor = node.walk();
     let mut argout: usize = 0;
     let mut vargout = false;
@@ -171,6 +174,7 @@ pub fn function_signature(
         .named_children(&mut cursor)
         .find(|c| c.kind() == "function_arguments")
     {
+        sig_range.end = inputs.end_position();
         argin = inputs.named_child_count();
         let mut cursor2 = node.walk();
         let mut cursor3 = node.walk();
@@ -242,6 +246,7 @@ pub fn function_signature(
         argout_names,
         argin_names,
         vargin_names,
+        range: sig_range,
         documentation: doc,
     };
     Ok(function)

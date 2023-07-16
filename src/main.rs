@@ -31,7 +31,9 @@ use log::{debug, error, info};
 use lsp_server::{Connection, Message};
 use lsp_types::{
     FoldingRangeProviderCapability, HoverProviderCapability, OneOf, PositionEncodingKind,
-    TextDocumentSyncCapability, TextDocumentSyncKind, TextDocumentSyncOptions,
+    SemanticTokenType, SemanticTokensFullOptions, SemanticTokensLegend, SemanticTokensOptions,
+    SemanticTokensServerCapabilities, TextDocumentSyncCapability, TextDocumentSyncKind,
+    TextDocumentSyncOptions, WorkDoneProgressOptions,
 };
 use lsp_types::{SaveOptions, ServerCapabilities};
 use process_alive::Pid;
@@ -80,6 +82,30 @@ fn configure_logger() -> Result<()> {
 
 fn start_server(arguments: Arguments) -> Result<ExitCode> {
     let (connection, _io_threads) = Connection::stdio();
+    let semantic_token_types = vec![
+        SemanticTokenType::NAMESPACE,
+        SemanticTokenType::TYPE,
+        SemanticTokenType::CLASS,
+        SemanticTokenType::ENUM,
+        SemanticTokenType::INTERFACE,
+        SemanticTokenType::STRUCT,
+        SemanticTokenType::TYPE_PARAMETER,
+        SemanticTokenType::PARAMETER,
+        SemanticTokenType::VARIABLE,
+        SemanticTokenType::PROPERTY,
+        SemanticTokenType::ENUM_MEMBER,
+        SemanticTokenType::EVENT,
+        SemanticTokenType::FUNCTION,
+        SemanticTokenType::METHOD,
+        SemanticTokenType::MACRO,
+        SemanticTokenType::KEYWORD,
+        SemanticTokenType::MODIFIER,
+        SemanticTokenType::COMMENT,
+        SemanticTokenType::STRING,
+        SemanticTokenType::NUMBER,
+        SemanticTokenType::REGEXP,
+        SemanticTokenType::OPERATOR,
+    ];
     let server_capabilities = serde_json::to_value(ServerCapabilities {
         text_document_sync: Some(TextDocumentSyncCapability::Options(
             TextDocumentSyncOptions {
@@ -103,6 +129,19 @@ fn start_server(arguments: Arguments) -> Result<ExitCode> {
         hover_provider: Some(HoverProviderCapability::Simple(true)),
         document_highlight_provider: Some(OneOf::Left(true)),
         folding_range_provider: Some(FoldingRangeProviderCapability::Simple(true)),
+        semantic_tokens_provider: Some(SemanticTokensServerCapabilities::SemanticTokensOptions(
+            SemanticTokensOptions {
+                work_done_progress_options: WorkDoneProgressOptions {
+                    work_done_progress: Some(false),
+                },
+                legend: SemanticTokensLegend {
+                    token_types: semantic_token_types,
+                    token_modifiers: vec![],
+                },
+                range: None,
+                full: Some(SemanticTokensFullOptions::Bool(true)),
+            },
+        )),
         ..Default::default()
     })?;
     let initialization_params = connection.initialize(server_capabilities)?;
@@ -119,6 +158,7 @@ fn start_server(arguments: Arguments) -> Result<ExitCode> {
         rescan_all_files: true,
         files: HashMap::new(),
         workspace: Workspace::default(),
+        request_id: 0,
     };
     let pid = session_state.workspace_params.process_id;
     let session_state: &'static mut SessionState = Box::leak(Box::new(session_state));

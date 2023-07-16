@@ -10,6 +10,8 @@ use std::thread::{spawn, JoinHandle};
 
 use anyhow::{anyhow, Context, Result};
 use log::{debug, error, info};
+use lsp_server::{Message, RequestId};
+use lsp_types::request::{Request, SemanticTokensRefresh};
 
 use crate::analysis::defref;
 use crate::code_loc;
@@ -62,6 +64,12 @@ impl SessionState {
                 rescan_file(state, file)?;
             }
         }
+        state.sender.send(Message::Request(lsp_server::Request {
+            id: RequestId::from(state.request_id),
+            method: SemanticTokensRefresh::METHOD.to_string(),
+            params: serde_json::to_value(())?,
+        }))?;
+        state.request_id += 1;
         Ok(())
     }
 
@@ -79,6 +87,12 @@ impl SessionState {
                 rescan_file(state, file)?;
             }
         }
+        state.sender.send(Message::Request(lsp_server::Request {
+            id: RequestId::from(state.request_id),
+            method: SemanticTokensRefresh::METHOD.to_string(),
+            params: serde_json::to_value(())?,
+        }))?;
+        state.request_id += 1;
         Ok(())
     }
 

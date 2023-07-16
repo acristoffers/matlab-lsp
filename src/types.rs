@@ -41,6 +41,9 @@ pub struct SessionState {
     pub files: HashMap<String, Arc<Mutex<ParsedFile>>>,
     // The path workspace.
     pub workspace: Workspace,
+
+    /// Id of last sent request
+    pub request_id: i32,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -76,6 +79,7 @@ pub struct FunctionSignature {
     pub argin_names: Vec<String>,
     pub vargin_names: Vec<String>,
     pub documentation: String,
+    pub range: Range,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -131,6 +135,7 @@ pub struct ClassDefinition {
 pub struct VariableDefinition {
     pub loc: Range,
     pub name: String,
+    pub is_parameter: bool,
 }
 
 #[derive(Debug, Clone, Default)]

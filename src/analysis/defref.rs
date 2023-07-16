@@ -45,7 +45,7 @@ pub fn analyze(
             .flat_map(|c| -> Result<(String, Node)> {
                 let capture_name = query_captures
                     .get(&c.index)
-                    .ok_or(code_loc!("Not caputure for index."))?
+                    .ok_or(code_loc!("Not capture for index."))?
                     .clone();
                 let node = c.node;
                 Ok((capture_name, node))
@@ -886,9 +886,19 @@ fn def_var(
         let vref = Arc::new(Mutex::new(vref.first().unwrap().clone()));
         workspace.references.push(vref);
     } else {
+        let mut is_parameter = false;
+        if let Some(parent) = node.parent() {
+            if parent.kind() == "function_output"
+                || parent.kind() == "function_arguments"
+                || parent.kind() == "multioutput_variable"
+            {
+                is_parameter = true;
+            }
+        }
         let definition = VariableDefinition {
             loc: node.range().into(),
             name: name.clone(),
+            is_parameter,
         };
         let definition = Arc::new(Mutex::new(definition));
         if let Some(scope) = scopes.first() {

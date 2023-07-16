@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 use crate::analysis::hover::hover_for_symbol;
 use crate::analysis::references::find_references_to_symbol;
+use crate::analysis::semantic::semantic_tokens;
 use crate::code_loc;
 use crate::types::{PointToPos, PosToPoint, Range};
 use crate::utils::{lock_mutex, SessionStateArc};
@@ -19,13 +20,13 @@ use log::{debug, info};
 use lsp_server::{ExtractError, Message, Request, RequestId, Response};
 use lsp_types::request::{
     DocumentHighlightRequest, FoldingRangeRequest, Formatting, GotoDefinition, HoverRequest,
-    References, Rename, Shutdown,
+    References, Rename, SemanticTokensFullRequest, Shutdown,
 };
 use lsp_types::{
     DocumentFormattingParams, DocumentHighlight, DocumentHighlightParams, FoldingRange,
     FoldingRangeKind, FoldingRangeParams, GotoDefinitionParams, GotoDefinitionResponse, Hover,
     HoverContents, HoverParams, Location, MarkupKind, Position, ReferenceParams, RenameParams,
-    TextEdit, Url, WorkspaceEdit,
+    SemanticTokens, SemanticTokensParams, TextEdit, Url, WorkspaceEdit,
 };
 use regex::Regex;
 use tree_sitter::{Point, Query, QueryCursor};
@@ -41,6 +42,7 @@ pub fn handle_request(state: SessionStateArc, request: &Request) -> Result<Optio
         .handle::<HoverRequest>(handle_hover)?
         .handle::<DocumentHighlightRequest>(handle_highlight)?
         .handle::<FoldingRangeRequest>(handle_folding)?
+        .handle::<SemanticTokensFullRequest>(handle_semantic)?
         .handle::<Shutdown>(handle_shutdown)?
         .finish()
 }
@@ -81,20 +83,25 @@ impl Dispatcher<'_> {
             return Ok(self);
         }
         drop(state);
-        let result = match cast::<R>(self.request.clone()) {
-            Ok((id, params)) => function(Arc::clone(&self.state), id, params),
-            Err(err @ ExtractError::JsonError { .. }) => Err(anyhow!("JsonError: {err:?}")),
-            Err(ExtractError::MethodMismatch(req)) => Err(anyhow!("MethodMismatch: {req:?}")),
+        match cast::<R>(self.request.clone()) {
+            Ok((id, params)) => {
+                self.result = Some(function(Arc::clone(&self.state), id, params));
+            }
+            Err(err @ ExtractError::JsonError { .. }) => {
+                self.result = Some(Err(anyhow!("JsonError: {err:?}")));
+            }
+            Err(ExtractError::MethodMismatch(req)) => {
+                if self.result.is_none() {
+                    self.result = Some(Err(anyhow!("MethodMismatch: {req:?}")));
+                }
+            }
         };
-        if result.is_ok() || self.result.is_none() {
-            self.result = Some(result);
-        }
         Ok(self)
     }
 
     fn finish(&mut self) -> Result<Option<ExitCode>> {
         let result = self.result.take();
-        result.map_or_else(|| Ok(None), |x| x)
+        result.unwrap_or(Ok(None))
     }
 }
 
@@ -416,6 +423,34 @@ fn handle_folding(
         "File was not yet parsed.".to_owned(),
     );
     lock.sender.send(Message::Response(resp))?;
+    Ok(None)
+}
+
+fn handle_semantic(
+    state: SessionStateArc,
+    id: RequestId,
+    params: SemanticTokensParams,
+) -> Result<Option<ExitCode>> {
+    info!("Received textDocument/semanticTokens/full.");
+    let lock = lock_mutex(&state)?;
+    let path = params.text_document.uri.path().to_string();
+    if let Some(file) = lock.files.get(&path) {
+        let parsed_file = lock_mutex(file)?;
+        let response = semantic_tokens(&parsed_file)?;
+        let sts = SemanticTokens {
+            result_id: None,
+            data: response,
+        };
+        let resp = Response::new_ok(id, sts);
+        lock.sender.send(Message::Response(resp))?;
+    } else {
+        let resp = Response::new_err(
+            id,
+            lsp_server::ErrorCode::InvalidParams as i32,
+            "File not found.".to_owned(),
+        );
+        lock.sender.send(Message::Response(resp))?;
+    }
     Ok(None)
 }
 

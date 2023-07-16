@@ -16,10 +16,11 @@ use crate::utils::{lock_mutex, read_to_string, rescan_file, SessionStateArc};
 use anyhow::{anyhow, Result};
 use itertools::Itertools;
 use log::{debug, info};
-use lsp_server::{ExtractError, Notification};
+use lsp_server::{ExtractError, Message, Notification, RequestId};
 use lsp_types::notification::{
     DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument, DidSaveTextDocument, Exit,
 };
+use lsp_types::request::{Request, SemanticTokensRefresh};
 use lsp_types::{
     DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
     DidSaveTextDocumentParams,
@@ -163,6 +164,12 @@ fn handle_text_document_did_open(
         namespace,
     )?;
     debug!("Inserted {key} into the store");
+    lock.sender.send(Message::Request(lsp_server::Request {
+        id: RequestId::from(lock.request_id),
+        method: SemanticTokensRefresh::METHOD.to_string(),
+        params: serde_json::to_value(())?,
+    }))?;
+    lock.request_id += 1;
     Ok(None)
 }
 
@@ -236,6 +243,12 @@ fn handle_text_document_did_change(
     }
     let mut lock = lock_mutex(&state)?;
     rescan_file(&mut lock, parsed_file)?;
+    lock.sender.send(Message::Request(lsp_server::Request {
+        id: RequestId::from(lock.request_id),
+        method: SemanticTokensRefresh::METHOD.to_string(),
+        params: serde_json::to_value(())?,
+    }))?;
+    lock.request_id += 1;
     lock.rescan_open_files = true;
     Ok(None)
 }
@@ -261,6 +274,12 @@ fn handle_text_document_did_save(
         drop(parsed_file_lock);
         rescan_file(&mut lock, parsed_file)?;
     }
+    lock.sender.send(Message::Request(lsp_server::Request {
+        id: RequestId::from(lock.request_id),
+        method: SemanticTokensRefresh::METHOD.to_string(),
+        params: serde_json::to_value(())?,
+    }))?;
+    lock.request_id += 1;
     lock.rescan_all_files = true;
     Ok(None)
 }
