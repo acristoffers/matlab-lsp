@@ -12,12 +12,10 @@ use crate::parsed_file::ParsedFile;
 use crate::types::{PosToPoint, Range, ReferenceTarget};
 use crate::utils::lock_mutex;
 use anyhow::{anyhow, Result};
-use log::{debug, info};
 use lsp_types::{SemanticToken, SemanticTokenType};
 use tree_sitter::{Node, Query, QueryCursor};
 
 pub fn semantic_tokens(parsed_file: &MutexGuard<'_, ParsedFile>) -> Result<Vec<SemanticToken>> {
-    info!("Extracting Semantic Tokens: {}", parsed_file.path);
     let scm = include_str!("../queries/semantic.scm");
     let query = Query::new(tree_sitter_matlab::language(), scm)?;
     let query_captures: HashMap<u32, String> = query
@@ -51,12 +49,10 @@ fn semantic_tokens_impl(
     captures: &[(String, Node)],
     parsed_file: &MutexGuard<'_, ParsedFile>,
 ) -> Result<Vec<SemanticToken>> {
-    debug!("Semantic impl.");
     let mut tokens = vec![];
     for (capture, node) in captures {
         let range: Range = node.range().into();
         let range: lsp_types::Range = range.into();
-        debug!("Processing capture {capture}");
         match capture.as_str() {
             "macro" => tokens.push(SemanticToken {
                 delta_line: range.start.line,
@@ -122,7 +118,6 @@ fn semantic_tokens_impl(
             _ => {}
         }
     }
-    debug!("{:#?}", tokens);
     Ok(deltalize_tokens(&tokens))
 }
 
@@ -228,14 +223,11 @@ fn deltalize_tokens(ts: &[SemanticToken]) -> Vec<SemanticToken> {
     for (i, token) in ts.iter().skip(1).enumerate() {
         let last = ts[i];
         let mut token = *token;
-        debug!("{:#?}", token);
-        debug!("{:#?}", last);
         token.delta_line -= last.delta_line;
         if token.delta_line == 0 {
             token.delta_start -= last.delta_start;
         }
         tokens.push(token);
     }
-    debug!("{:#?}", tokens);
     tokens
 }

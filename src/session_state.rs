@@ -13,11 +13,20 @@ use log::{debug, error, info};
 use lsp_server::{Message, RequestId};
 use lsp_types::request::{Request, SemanticTokensRefresh};
 
-use crate::analysis::{defref, diagnostics};
+use crate::analysis::diagnostics;
 use crate::code_loc;
 use crate::parsed_file::{FileType, ParsedFile};
 pub use crate::types::{ClassFolder, Namespace, SessionState};
-use crate::utils::{lock_mutex, rescan_file, SessionStateArc};
+use crate::utils::{
+    lock_mutex, rescan_file, send_progress_begin, send_progress_end, send_progress_report,
+    SessionStateArc,
+};
+
+type FileTuple = (
+    String,
+    Option<Arc<Mutex<Namespace>>>,
+    Option<Arc<Mutex<ClassFolder>>>,
+);
 
 impl SessionState {
     pub fn start_worker(state: SessionStateArc) -> Result<JoinHandle<Result<()>>> {
@@ -56,7 +65,13 @@ impl SessionState {
 
     fn rescan_open_files(state: &mut MutexGuard<'_, &mut SessionState>) -> Result<()> {
         debug!("Rescanning open files.");
-        for file in state.files.clone().values() {
+        send_progress_begin(
+            state,
+            0,
+            "Rescanning files.",
+            format!("0/{}", state.files.len()),
+        )?;
+        for (i, file) in state.files.clone().values().enumerate() {
             let file_lock = lock_mutex(file)?;
             if file_lock.open {
                 drop(file_lock);
@@ -64,8 +79,15 @@ impl SessionState {
                 rescan_file(state, file2)?;
                 let mut file_lock = lock_mutex(file)?;
                 diagnostics::diagnotiscs(state, &mut file_lock)?;
+                send_progress_report(
+                    state,
+                    0,
+                    format!("scanning file {}/{}", i, state.files.len()),
+                    (100 * i / state.files.len()).try_into()?,
+                )?;
             }
         }
+        send_progress_end(state, 0, "Files rescanned.")?;
         state.sender.send(Message::Request(lsp_server::Request {
             id: RequestId::from(state.request_id),
             method: SemanticTokensRefresh::METHOD.to_string(),
@@ -76,19 +98,52 @@ impl SessionState {
     }
 
     fn rescan_all_files(state: &mut MutexGuard<'_, &mut SessionState>) -> Result<()> {
-        debug!("Rescanning open files.");
-        state.workspace.classes.clear();
-        state.workspace.functions.clear();
+        debug!("Rescanning project files.");
+        let project_path = if let Some(uri) = &state.workspace_params.root_uri {
+            uri.path().to_owned()
+        } else {
+            "".to_owned()
+        };
+        state
+            .workspace
+            .classes
+            .retain(|k, _| !k.starts_with(&project_path));
+        state
+            .workspace
+            .functions
+            .retain(|k, _| !k.starts_with(&project_path));
+        state
+            .workspace
+            .scripts
+            .retain(|k, _| !k.starts_with(&project_path));
         state.workspace.references.clear();
-        state.workspace.scripts.clear();
         state.workspace.variables.clear();
+        send_progress_begin(
+            state,
+            0,
+            "Rescanning files.",
+            format!("0/{}", state.files.len()),
+        )?;
         // Twice, to get cross-references right.
         for _ in 0..2 {
-            for file in state.files.clone().values() {
+            for (i, file) in state.files.clone().values().enumerate() {
                 let file = Arc::clone(file);
+                let lock = lock_mutex(&file)?;
+                if !lock.path.starts_with(&project_path) {
+                    drop(lock);
+                    continue;
+                }
+                drop(lock);
                 rescan_file(state, file)?;
+                send_progress_report(
+                    state,
+                    0,
+                    format!("scanning file {}/{}", i, state.files.len()),
+                    (100 * i / state.files.len()).try_into()?,
+                )?;
             }
         }
+        send_progress_end(state, 0, "Files rescanned.")?;
         state.sender.send(Message::Request(lsp_server::Request {
             id: RequestId::from(state.request_id),
             method: SemanticTokensRefresh::METHOD.to_string(),
@@ -98,9 +153,9 @@ impl SessionState {
         Ok(())
     }
 
-    fn full_scan_path(arc: SessionStateArc) -> Result<()> {
+    fn full_scan_path(state: SessionStateArc) -> Result<()> {
         info!("Scanning workspace and path");
-        let mut lock = lock_mutex(&arc).context(code_loc!())?;
+        let mut lock = lock_mutex(&state).context(code_loc!())?;
         let mut paths = lock.path.clone();
         if let Some(uri) = &lock.workspace_params.root_uri {
             let path = uri.path().to_string();
@@ -112,27 +167,35 @@ impl SessionState {
         }
         lock.rescan_open_files = true;
         drop(lock);
-        let mut handles = vec![];
         paths.sort();
         paths.dedup();
+        let mut files = vec![];
         for path in paths {
-            info!("Launching thread to scan {path}");
-            let state = Arc::clone(&arc);
-            let handle = spawn(move || -> Result<()> {
-                info!("Thread started for {}", path);
-                if let Err(err) = SessionState::scan_folder(state, path.clone(), None, None) {
-                    error!("Error scanning path {}: {}", path, err);
-                    Err(err)
-                } else {
-                    info!("Thread for path {} finished.", path);
-                    Ok(())
-                }
-            });
-            handles.push(handle);
+            let state = Arc::clone(&state);
+            let fs = SessionState::scan_folder(state, path.clone(), None, None)?;
+            files.extend(fs);
         }
-        for handle in handles {
-            let _ = handle.join();
+        let mut lock = lock_mutex(&state).context(code_loc!())?;
+        send_progress_begin(
+            &mut lock,
+            0,
+            "Parsing workspace files:",
+            format!("0/{} files parsed.", files.len()),
+        )?;
+        drop(lock);
+        for (i, (path, ns, cs)) in files.iter().enumerate() {
+            let mut lock = lock_mutex(&state).context(code_loc!())?;
+            send_progress_report(
+                &mut lock,
+                0,
+                format!("{}/{} files parsed.", i, files.len()),
+                (100 * i / files.len()).try_into()?,
+            )?;
+            SessionState::parse_file(&mut lock, path.clone(), ns.clone(), cs.clone())?;
+            drop(lock); // Gives the main thread some time to process too.
         }
+        let mut lock = lock_mutex(&state).context(code_loc!())?;
+        send_progress_end(&mut lock, 0, "Finished parsing files.")?;
         Ok(())
     }
 
@@ -141,10 +204,11 @@ impl SessionState {
         path: String,
         ns: Option<Arc<Mutex<Namespace>>>,
         cf: Option<Arc<Mutex<ClassFolder>>>,
-    ) -> Result<()> {
+    ) -> Result<Vec<FileTuple>> {
         let dir = std::fs::read_dir(path.clone()).context(code_loc!())?;
         let mut ns = ns;
-        let cf = cf;
+        let mut cf = cf;
+        let mut files = vec![];
         for entry in dir.flatten() {
             debug!("Considering entry {:?}", entry);
             if entry.metadata().context(code_loc!())?.is_file() {
@@ -152,68 +216,19 @@ impl SessionState {
                     continue;
                 }
                 let path = entry.path().to_string_lossy().to_string();
-                let lock = lock_mutex(&state).context(code_loc!())?;
-                if lock.files.contains_key(&path) {
-                    debug!("File {path} is already parsed, skipping");
-                    continue;
-                }
-                debug!("Working on file {path}");
-                drop(lock);
-                let parsed_file = ParsedFile::parse_file(path).context(code_loc!())?;
-                debug!(
-                    "Parsed file contains {} bytes of code.",
-                    parsed_file.contents.len()
-                );
-                let parsed_file = Arc::new(Mutex::new(parsed_file));
-                let ns_path = if let Some(ns_) = ns {
-                    ns = Some(Arc::clone(&ns_));
-                    lock_mutex(&ns_)?.path.clone()
+                let ns = if let Some(n) = ns.take() {
+                    ns = Some(Arc::clone(&n));
+                    Some(n)
                 } else {
-                    "".into()
+                    None
                 };
-                let mut parsed_file_lock = lock_mutex(&parsed_file)?;
-                let path = parsed_file_lock.path.clone();
-                if let Some(ns) = &ns {
-                    let mut ns_lock = lock_mutex(ns)?;
-                    ns_lock.files.push(Arc::clone(&parsed_file));
-                    parsed_file_lock
-                        .workspace
-                        .namespaces
-                        .insert(ns_lock.path.clone(), Arc::clone(ns));
-                    parsed_file_lock.in_namespace = Some(Arc::clone(ns));
-                } else if let Some(cf) = &cf {
-                    let mut cf_lock = lock_mutex(cf)?;
-                    cf_lock.files.push(Arc::clone(&parsed_file));
-                    parsed_file_lock
-                        .workspace
-                        .classfolders
-                        .insert(cf_lock.path.clone(), Arc::clone(cf));
-                    parsed_file_lock.in_classfolder = Some(Arc::clone(cf));
-                }
-                debug!("Inserting file {path} into state.");
-                let mut lock = lock_mutex(&state).context(code_loc!())?;
-                ParsedFile::define_type(
-                    &mut lock,
-                    Arc::clone(&parsed_file),
-                    &mut parsed_file_lock,
-                    ns_path,
-                )?;
-                lock.files.insert(path, Arc::clone(&parsed_file));
-                match &parsed_file_lock.file_type {
-                    FileType::Function(f) => {
-                        lock.workspace
-                            .functions
-                            .insert(lock_mutex(f)?.path.clone(), Arc::clone(f));
-                    }
-                    FileType::Class(f) => {
-                        lock.workspace
-                            .classes
-                            .insert(lock_mutex(f)?.path.clone(), Arc::clone(f));
-                    }
-                    _ => {}
-                }
-                drop(parsed_file_lock);
-                defref::analyze(&lock, Arc::clone(&parsed_file))?;
+                let cf = if let Some(c) = cf.take() {
+                    cf = Some(Arc::clone(&c));
+                    Some(c)
+                } else {
+                    None
+                };
+                files.push((path, ns, cf));
             } else if entry.metadata().context(code_loc!())?.is_dir() {
                 let name = entry.file_name().to_string_lossy().to_string();
                 let folder_path = entry.path().to_string_lossy().to_string();
@@ -239,13 +254,14 @@ impl SessionState {
                         classes: HashMap::new(),
                     };
                     let namespace = Arc::new(Mutex::new(namespace));
-                    SessionState::scan_folder(
+                    let fs = SessionState::scan_folder(
                         Arc::clone(&state),
                         folder_path.clone(),
                         Some(Arc::clone(&namespace)),
                         None,
                     )
                     .context(code_loc!())?;
+                    files.extend(fs);
                     if let Some(ns) = ns.as_ref() {
                         lock_mutex(ns)?
                             .namespaces
@@ -275,13 +291,14 @@ impl SessionState {
                         methods: vec![],
                     };
                     let class_folder = Arc::new(Mutex::new(class_folder));
-                    SessionState::scan_folder(
+                    let fs = SessionState::scan_folder(
                         Arc::clone(&state),
                         folder_path.clone(),
                         None,
                         Some(Arc::clone(&class_folder)),
                     )
                     .context(code_loc!())?;
+                    files.extend(fs);
                     if let Some(ns) = ns.as_mut() {
                         lock_mutex(ns)?
                             .classfolders
@@ -295,6 +312,77 @@ impl SessionState {
                 }
             }
         }
+        Ok(files)
+    }
+
+    fn parse_file(
+        state: &mut MutexGuard<'_, &mut SessionState>,
+        path: String,
+        ns: Option<Arc<Mutex<Namespace>>>,
+        cf: Option<Arc<Mutex<ClassFolder>>>,
+    ) -> Result<()> {
+        let mut ns = ns;
+        let cf = cf;
+        if state.files.contains_key(&path) {
+            debug!("File {path} is already parsed, skipping");
+            return Ok(());
+        }
+        debug!("Working on file {path}");
+        let parsed_file = ParsedFile::parse_file(path).context(code_loc!())?;
+        debug!(
+            "Parsed file contains {} bytes of code.",
+            parsed_file.contents.len()
+        );
+        let parsed_file = Arc::new(Mutex::new(parsed_file));
+        let ns_path = if let Some(ns_) = ns {
+            ns = Some(Arc::clone(&ns_));
+            lock_mutex(&ns_)?.path.clone()
+        } else {
+            "".into()
+        };
+        let mut parsed_file_lock = lock_mutex(&parsed_file)?;
+        let path = parsed_file_lock.path.clone();
+        if let Some(ns) = &ns {
+            let mut ns_lock = lock_mutex(ns)?;
+            ns_lock.files.push(Arc::clone(&parsed_file));
+            parsed_file_lock
+                .workspace
+                .namespaces
+                .insert(ns_lock.path.clone(), Arc::clone(ns));
+            parsed_file_lock.in_namespace = Some(Arc::clone(ns));
+        } else if let Some(cf) = &cf {
+            let mut cf_lock = lock_mutex(cf)?;
+            cf_lock.files.push(Arc::clone(&parsed_file));
+            parsed_file_lock
+                .workspace
+                .classfolders
+                .insert(cf_lock.path.clone(), Arc::clone(cf));
+            parsed_file_lock.in_classfolder = Some(Arc::clone(cf));
+        }
+        debug!("Inserting file {path} into state.");
+        ParsedFile::define_type(
+            state,
+            Arc::clone(&parsed_file),
+            &mut parsed_file_lock,
+            ns_path,
+        )?;
+        state.files.insert(path, Arc::clone(&parsed_file));
+        match &parsed_file_lock.file_type {
+            FileType::Function(f) => {
+                state
+                    .workspace
+                    .functions
+                    .insert(lock_mutex(f)?.path.clone(), Arc::clone(f));
+            }
+            FileType::Class(f) => {
+                state
+                    .workspace
+                    .classes
+                    .insert(lock_mutex(f)?.path.clone(), Arc::clone(f));
+            }
+            _ => {}
+        }
+        drop(parsed_file_lock);
         Ok(())
     }
 }

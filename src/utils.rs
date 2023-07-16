@@ -12,9 +12,15 @@ use crate::parsed_file::{FunctionSignature, ParsedFile};
 use crate::session_state::SessionState;
 use crate::types::Range;
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use itertools::Itertools;
 use log::debug;
+use lsp_server::Message;
+use lsp_types::notification::{Notification, Progress};
+use lsp_types::{
+    ProgressParams, ProgressParamsValue, WorkDoneProgress, WorkDoneProgressBegin,
+    WorkDoneProgressEnd, WorkDoneProgressReport,
+};
 use tree_sitter::Node;
 
 pub type SessionStateArc = Arc<Mutex<&'static mut SessionState>>;
@@ -54,6 +60,63 @@ macro_rules! code_loc {
 /// Locks a mutex, and adds an error message in case of error.
 pub(crate) fn lock_mutex<T>(arc: &Arc<Mutex<T>>) -> Result<MutexGuard<'_, T>> {
     arc.lock().map_err(|_| code_loc!("Could not lock mutex."))
+}
+
+pub fn send_progress_begin<S: AsRef<str>, T: AsRef<str>>(
+    state: &mut MutexGuard<'_, &mut SessionState>,
+    id: i32,
+    title: S,
+    message: T,
+) -> Result<()> {
+    let wd_begin = WorkDoneProgress::Begin(WorkDoneProgressBegin {
+        title: title.as_ref().into(),
+        cancellable: Some(false),
+        message: Some(message.as_ref().into()),
+        percentage: Some(0),
+    });
+    send_notification(state, id, wd_begin)
+}
+
+pub fn send_progress_report<T: AsRef<str>>(
+    state: &mut MutexGuard<'_, &mut SessionState>,
+    id: i32,
+    message: T,
+    percentage: u32,
+) -> Result<()> {
+    let wd_begin = WorkDoneProgress::Report(WorkDoneProgressReport {
+        cancellable: Some(false),
+        message: Some(message.as_ref().into()),
+        percentage: Some(percentage),
+    });
+    send_notification(state, id, wd_begin)
+}
+
+pub fn send_progress_end<T: AsRef<str>>(
+    state: &mut MutexGuard<'_, &mut SessionState>,
+    id: i32,
+    message: T,
+) -> Result<()> {
+    let wd_begin = WorkDoneProgress::End(WorkDoneProgressEnd {
+        message: Some(message.as_ref().into()),
+    });
+    send_notification(state, id, wd_begin)
+}
+
+pub fn send_notification(
+    state: &mut MutexGuard<'_, &mut SessionState>,
+    id: i32,
+    progress: WorkDoneProgress,
+) -> Result<()> {
+    state
+        .sender
+        .send(Message::Notification(lsp_server::Notification {
+            method: Progress::METHOD.to_string(),
+            params: serde_json::to_value(ProgressParams {
+                token: lsp_types::NumberOrString::Number(id),
+                value: ProgressParamsValue::WorkDone(progress),
+            })?,
+        }))
+        .context(code_loc!())
 }
 
 pub fn rescan_file(
