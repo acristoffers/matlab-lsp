@@ -200,7 +200,7 @@ fn analyze_impl(
                     if let Some(v) = vs.first() {
                         let vref = Arc::new(Mutex::new(v.clone()));
                         workspace.references.push(vref);
-                    } else {
+                    } else if parent_of_kind("assignment", *node).is_none() {
                         let vref = Reference {
                             loc: node.range().into(),
                             name,
@@ -343,7 +343,7 @@ fn fncall_capture_impl(
                 if let Some(fref) = fs.first() {
                     let fref = Arc::new(Mutex::new(fref.clone()));
                     workspace.references.push(fref);
-                } else {
+                } else if parent_of_kind("assignment", *node).is_none() {
                     let r = Reference {
                         loc: name_node.range().into(),
                         name: fname.clone(),
@@ -840,6 +840,11 @@ fn def_var(
                 }
             }
         }
+    }
+    if parent_of_kind("function_call", node).is_some()
+        && !ref_to_var(name.clone(), workspace, scopes, functions, node)?.is_empty()
+    {
+        return Ok(());
     }
     let definition = VariableDefinition {
         loc: node.range().into(),
