@@ -224,10 +224,10 @@ impl Range {
     }
 
     pub fn contains(&self, other: Point) -> bool {
-        self.start.row <= other.row
-            && other.row <= self.end.row
-            && self.start.column <= other.column
-            && other.column <= self.end.column
+        self.start.row < other.row && other.row < self.end.row
+            || (self.start.row == other.row || self.end.row == other.row)
+                && self.start.column <= other.column
+                && other.column <= self.end.column
     }
 
     pub fn find_bytes(&self, parsed_file: &MutexGuard<'_, ParsedFile>) -> tree_sitter::Range {

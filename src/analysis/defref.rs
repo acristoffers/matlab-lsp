@@ -17,7 +17,7 @@ use crate::utils::{function_signature, lock_mutex};
 use anyhow::{anyhow, Result};
 use itertools::Itertools;
 use log::{debug, error, info};
-use tree_sitter::{Node, Query, QueryCursor};
+use tree_sitter::{Node, Point, Query, QueryCursor};
 
 pub fn analyze(
     state: &MutexGuard<'_, &mut SessionState>,
@@ -134,7 +134,14 @@ fn analyze_impl(
         let name = node.utf8_text(parsed_file.contents.as_bytes())?.to_string();
         debug!("Got node {name}.");
         match capture.as_str() {
-            "vardef" => def_var(name, &mut workspace, &scopes, &mut functions, *node)?,
+            "vardef" => def_var(
+                name,
+                &mut workspace,
+                &scopes,
+                &mut functions,
+                *node,
+                parsed_file,
+            )?,
             "command" => command_capture_impl(
                 name,
                 &mut workspace,
@@ -179,9 +186,14 @@ fn analyze_impl(
                 {
                     debug!("No references found at point.");
                     let mut vs = vec![];
-                    for vref in
-                        ref_to_var(name.clone(), &mut workspace, &scopes, &mut functions, *node)?
-                    {
+                    for vref in ref_to_var(
+                        name.clone(),
+                        &mut workspace,
+                        &scopes,
+                        &mut functions,
+                        *node,
+                        parsed_file,
+                    )? {
                         if let ReferenceTarget::Variable(v) = &vref.target {
                             if let Some(parent) = parent_of_kind("assignment", *node) {
                                 if let Some(left) = parent.child_by_field_name("left") {
@@ -245,7 +257,7 @@ fn command_capture_impl(
     functions: &mut HashMap<usize, (Node, Workspace)>,
     state: &MutexGuard<'_, &mut SessionState>,
     node: &Node,
-    parsed_file: &ParsedFile,
+    parsed_file: &MutexGuard<'_, ParsedFile>,
 ) -> Result<()> {
     debug!("Defining command [{name}].");
     match name.as_str() {
@@ -259,7 +271,7 @@ fn command_capture_impl(
                     .skip(1)
                 {
                     let varname = arg.utf8_text(parsed_file.contents.as_bytes())?.to_string();
-                    def_var(varname, workspace, scopes, functions, arg)?;
+                    def_var(varname, workspace, scopes, functions, arg, parsed_file)?;
                 }
             }
         }
@@ -304,7 +316,7 @@ fn fncall_capture_impl(
     functions: &mut HashMap<usize, (Node, Workspace)>,
     state: &MutexGuard<'_, &mut SessionState>,
     node: &Node,
-    parsed_file: &ParsedFile,
+    parsed_file: &MutexGuard<'_, ParsedFile>,
 ) -> Result<()> {
     if let Some(parent) = node.parent() {
         if parent.kind() == "field_expression" {
@@ -325,7 +337,14 @@ fn fncall_capture_impl(
                 .map(String::from)
             {
                 debug!("Defining function call {fname}.");
-                let vs = ref_to_var(fname.clone(), workspace, scopes, functions, name_node)?;
+                let vs = ref_to_var(
+                    fname.clone(),
+                    workspace,
+                    scopes,
+                    functions,
+                    name_node,
+                    parsed_file,
+                )?;
                 if let Some(v) = vs.first() {
                     let v = Arc::new(Mutex::new(v.clone()));
                     workspace.references.push(v);
@@ -362,7 +381,7 @@ fn import_capture_impl(
     workspace: &mut Workspace,
     state: &MutexGuard<'_, &mut SessionState>,
     node: &Node,
-    parsed_file: &ParsedFile,
+    parsed_file: &MutexGuard<'_, ParsedFile>,
 ) -> Result<()> {
     if let Ok(path) = node.utf8_text(parsed_file.contents.as_bytes()) {
         debug!("Importing {path}");
@@ -393,7 +412,7 @@ fn field_capture_impl(
     functions: &mut HashMap<usize, (Node, Workspace)>,
     state: &MutexGuard<'_, &mut SessionState>,
     node: &Node,
-    parsed_file: &ParsedFile,
+    parsed_file: &MutexGuard<'_, ParsedFile>,
 ) -> Result<()> {
     debug!("Defining field expression.");
     let is_def = if let Some(parent) = node.parent() {
@@ -420,7 +439,14 @@ fn field_capture_impl(
                         .utf8_text(parsed_file.contents.as_bytes())
                         .map(String::from)
                     {
-                        let vs = ref_to_var(name.clone(), workspace, scopes, functions, name_node)?;
+                        let vs = ref_to_var(
+                            name.clone(),
+                            workspace,
+                            scopes,
+                            functions,
+                            name_node,
+                            parsed_file,
+                        )?;
                         let fs = ref_to_fn(
                             name.clone(),
                             workspace,
@@ -435,7 +461,7 @@ fn field_capture_impl(
                             workspace.references.push(r);
                         }
                         if is_def {
-                            def_var(name, workspace, scopes, functions, name_node)?;
+                            def_var(name, workspace, scopes, functions, name_node, parsed_file)?;
                         }
                     }
                 }
@@ -485,7 +511,14 @@ fn field_capture_impl(
             let path = fields.iter().take(i + 1).map(|(n, _)| n).join(".");
             if is_def {
                 // Definitions can shadow namespaces, so we don't care about namespaces here.
-                let vref = ref_to_var(path.clone(), workspace, scopes, functions, *field)?;
+                let vref = ref_to_var(
+                    path.clone(),
+                    workspace,
+                    scopes,
+                    functions,
+                    *field,
+                    parsed_file,
+                )?;
                 if let Some(v) = vref.first() {
                     let r = Arc::new(Mutex::new(v.clone()));
                     workspace.references.push(r);
@@ -500,13 +533,20 @@ fn field_capture_impl(
                     workspace.references.push(reference);
                 }
                 if i == 0 || i == fields.len().saturating_sub(1) {
-                    def_var(path, workspace, scopes, functions, *field)?;
+                    def_var(path, workspace, scopes, functions, *field, parsed_file)?;
                 }
             } else {
                 // If it is not a definition, it can be a namespace
                 // But we first need to make sure it is not a variable.
                 if i == 0 {
-                    let vref = ref_to_var(path.clone(), workspace, scopes, functions, *field)?;
+                    let vref = ref_to_var(
+                        path.clone(),
+                        workspace,
+                        scopes,
+                        functions,
+                        *field,
+                        parsed_file,
+                    )?;
                     is_pack = vref.first().is_none();
                 }
                 if is_pack {
@@ -617,7 +657,14 @@ fn field_capture_impl(
                 } else {
                     debug!("It's a variable, not a package.");
                     // The base name is a variable, so act normal
-                    let vs = ref_to_var(path.clone(), workspace, scopes, functions, *field)?;
+                    let vs = ref_to_var(
+                        path.clone(),
+                        workspace,
+                        scopes,
+                        functions,
+                        *field,
+                        parsed_file,
+                    )?;
                     if let Some(v) = vs.first() {
                         let v = Arc::new(Mutex::new(v.clone()));
                         workspace.references.push(v);
@@ -638,41 +685,13 @@ fn field_capture_impl(
     Ok(())
 }
 
-fn parent_function(node: Node) -> Option<Node> {
-    let mut node = node;
-    loop {
-        if let Some(parent) = node.parent() {
-            if parent.kind() == "function_definition" || parent.kind() == "lambda" {
-                return Some(parent);
-            }
-            node = parent;
-        } else {
-            return None;
-        }
-    }
-}
-
-pub fn parent_of_kind<S: Into<String>>(kind: S, node: Node) -> Option<Node> {
-    let kind: String = kind.into();
-    let mut node = node;
-    loop {
-        if let Some(parent) = node.parent() {
-            if parent.kind() == kind {
-                return Some(parent);
-            }
-            node = parent;
-        } else {
-            return None;
-        }
-    }
-}
-
 fn ref_to_var(
     name: String,
     workspace: &mut Workspace,
     scopes: &[usize],
     functions: &mut HashMap<usize, (Node, Workspace)>,
     node: Node,
+    parsed_file: &MutexGuard<'_, ParsedFile>,
 ) -> Result<Vec<Reference>> {
     let mut references = vec![];
     let (is_assignment, p_range) = if let Some(parent) = parent_of_kind("assignment", node) {
@@ -690,6 +709,11 @@ fn ref_to_var(
             if v_lock.name == name {
                 if is_assignment && p_range.fully_contains(v_lock.loc) {
                     continue;
+                }
+                if let Some(ndef) = node_at_pos(parsed_file, v_lock.loc.start) {
+                    if !is_in_soft_scope(node, ndef) {
+                        continue;
+                    }
                 }
                 let r = Reference {
                     loc: node.range().into(),
@@ -709,6 +733,11 @@ fn ref_to_var(
             if v_lock.name == name {
                 if is_assignment && p_range.fully_contains(v_lock.loc) {
                     continue;
+                }
+                if let Some(ndef) = node_at_pos(parsed_file, v_lock.loc.start) {
+                    if !is_in_soft_scope(node, ndef) {
+                        continue;
+                    }
                 }
                 let r = Reference {
                     loc: node.range().into(),
@@ -799,6 +828,7 @@ fn def_var(
     scopes: &[usize],
     functions: &mut HashMap<usize, (Node, Workspace)>,
     node: Node,
+    parsed_file: &MutexGuard<'_, ParsedFile>,
 ) -> Result<()> {
     debug!("Defining variable {name}");
     let mut cursor = node.walk();
@@ -841,24 +871,120 @@ fn def_var(
             }
         }
     }
-    if parent_of_kind("function_call", node).is_some()
-        && !ref_to_var(name.clone(), workspace, scopes, functions, node)?.is_empty()
-    {
+    let vref = ref_to_var(
+        name.clone(),
+        workspace,
+        scopes,
+        functions,
+        node,
+        parsed_file,
+    )?;
+    if parent_of_kind("function_call", node).is_some() && !vref.is_empty() {
         return Ok(());
     }
-    let definition = VariableDefinition {
-        loc: node.range().into(),
-        name: name.clone(),
-    };
-    let definition = Arc::new(Mutex::new(definition));
-    if let Some(scope) = scopes.first() {
-        if let Some((_, ws)) = functions.get_mut(scope) {
-            ws.variables.push(definition);
-        }
+    if soft_scope_parent(node).is_some() && !vref.is_empty() {
+        let vref = Arc::new(Mutex::new(vref.first().unwrap().clone()));
+        workspace.references.push(vref);
     } else {
-        workspace.variables.push(definition);
+        let definition = VariableDefinition {
+            loc: node.range().into(),
+            name: name.clone(),
+        };
+        let definition = Arc::new(Mutex::new(definition));
+        if let Some(scope) = scopes.first() {
+            if let Some((_, ws)) = functions.get_mut(scope) {
+                ws.variables.push(definition);
+            }
+        } else {
+            workspace.variables.push(definition);
+        }
     }
     Ok(())
+}
+
+/// Verifies if some and other are in the same soft-scope. A soft-scope is introduced by any
+/// statement with multiple blocks. This definition is necessary to avoid variables in a branch of
+/// an if/elseif/else or case/otherwise or try/catch to reference each other instead of the
+/// variable before the block.
+fn is_in_soft_scope(nref: Node, ndef: Node) -> bool {
+    let mut node = nref;
+    loop {
+        if let Some(parent) = soft_scope_parent(node) {
+            let range: Range = parent.range().into();
+            if range.contains(nref.start_position()) && range.contains(ndef.start_position()) {
+                let mut cursor = parent.walk();
+                for child in parent.named_children(&mut cursor) {
+                    let range: Range = child.range().into();
+                    if range.contains(ndef.start_position())
+                        && !range.contains(nref.start_position())
+                    {
+                        return false;
+                    }
+                }
+            }
+            node = parent;
+        } else {
+            return true;
+        }
+    }
+}
+
+fn soft_scope_parent(node: Node) -> Option<Node> {
+    let mut node = node;
+    loop {
+        if let Some(parent) = node.parent() {
+            if parent.kind() == "if_statement"
+                || parent.kind() == "switch_statement"
+                || parent.kind() == "try_statement"
+                || parent.kind() == "for_statement"
+                || parent.kind() == "while_statement"
+            {
+                return Some(parent);
+            }
+            node = parent;
+        } else {
+            return None;
+        }
+    }
+}
+
+fn parent_function(node: Node) -> Option<Node> {
+    let mut node = node;
+    loop {
+        if let Some(parent) = node.parent() {
+            if parent.kind() == "function_definition" || parent.kind() == "lambda" {
+                return Some(parent);
+            }
+            node = parent;
+        } else {
+            return None;
+        }
+    }
+}
+
+pub fn parent_of_kind<S: Into<String>>(kind: S, node: Node) -> Option<Node> {
+    let kind: String = kind.into();
+    let mut node = node;
+    loop {
+        if let Some(parent) = node.parent() {
+            if parent.kind() == kind {
+                return Some(parent);
+            }
+            node = parent;
+        } else {
+            return None;
+        }
+    }
+}
+
+fn node_at_pos<'a>(parsed_file: &'a MutexGuard<'_, ParsedFile>, point: Point) -> Option<Node<'a>> {
+    if let Some(tree) = &parsed_file.tree {
+        tree.root_node()
+            .named_descendant_for_point_range(point, point)
+    } else {
+        debug!("File has no tree!");
+        None
+    }
 }
 
 fn pkg_basename(s: String) -> (String, String) {
