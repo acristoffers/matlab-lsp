@@ -11,23 +11,24 @@ use std::sync::Arc;
 use crate::analysis::hover::hover_for_symbol;
 use crate::analysis::references::find_references_to_symbol;
 use crate::code_loc;
-use crate::types::{PosToPoint, Range};
+use crate::types::{PointToPos, PosToPoint, Range};
 use crate::utils::{lock_mutex, SessionStateArc};
 
 use anyhow::{anyhow, Context, Result};
 use log::{debug, info};
 use lsp_server::{ExtractError, Message, Request, RequestId, Response};
 use lsp_types::request::{
-    DocumentHighlightRequest, Formatting, GotoDefinition, HoverRequest, References, Rename,
-    Shutdown,
+    DocumentHighlightRequest, FoldingRangeRequest, Formatting, GotoDefinition, HoverRequest,
+    References, Rename, Shutdown,
 };
 use lsp_types::{
-    DocumentFormattingParams, DocumentHighlight, DocumentHighlightParams, GotoDefinitionParams,
-    GotoDefinitionResponse, Hover, HoverContents, HoverParams, Location, MarkupKind, Position,
-    ReferenceParams, RenameParams, TextEdit, Url, WorkspaceEdit,
+    DocumentFormattingParams, DocumentHighlight, DocumentHighlightParams, FoldingRange,
+    FoldingRangeKind, FoldingRangeParams, GotoDefinitionParams, GotoDefinitionResponse, Hover,
+    HoverContents, HoverParams, Location, MarkupKind, Position, ReferenceParams, RenameParams,
+    TextEdit, Url, WorkspaceEdit,
 };
 use regex::Regex;
-use tree_sitter::Point;
+use tree_sitter::{Point, Query, QueryCursor};
 
 pub fn handle_request(state: SessionStateArc, request: &Request) -> Result<Option<ExitCode>> {
     debug!("Handling a request.");
@@ -39,6 +40,7 @@ pub fn handle_request(state: SessionStateArc, request: &Request) -> Result<Optio
         .handle::<Rename>(handle_rename)?
         .handle::<HoverRequest>(handle_hover)?
         .handle::<DocumentHighlightRequest>(handle_highlight)?
+        .handle::<FoldingRangeRequest>(handle_folding)?
         .handle::<Shutdown>(handle_shutdown)?
         .finish()
 }
@@ -367,6 +369,52 @@ fn handle_highlight(
         }
     }
     let resp = Response::new_ok(id, response);
+    lock.sender.send(Message::Response(resp))?;
+    Ok(None)
+}
+
+fn handle_folding(
+    state: SessionStateArc,
+    id: RequestId,
+    params: FoldingRangeParams,
+) -> Result<Option<ExitCode>> {
+    info!("Received textDocument/foldingRange.");
+    let lock = lock_mutex(&state)?;
+    let path = params.text_document.uri.path().to_string();
+    if let Some(file) = lock.files.get(&path) {
+        let file_lock = lock_mutex(file)?;
+        if let Some(tree) = &file_lock.tree {
+            let root = tree.root_node();
+            let scm = "(block) @block";
+            let query = Query::new(tree_sitter_matlab::language(), scm)?;
+            let mut cursor = QueryCursor::new();
+            let mut resp = vec![];
+            for node in cursor
+                .captures(&query, root, file_lock.contents.as_bytes())
+                .map(|(c, _)| c)
+                .flat_map(|c| c.captures)
+                .map(|c| c.node)
+            {
+                let fold = FoldingRange {
+                    start_line: node.start_position().to_position().line,
+                    start_character: None,
+                    end_line: node.end_position().to_position().line,
+                    end_character: None,
+                    kind: Some(FoldingRangeKind::Region),
+                    collapsed_text: None,
+                };
+                resp.push(fold);
+            }
+            let resp = Response::new_ok(id, resp);
+            lock.sender.send(Message::Response(resp))?;
+            return Ok(None);
+        }
+    }
+    let resp = Response::new_err(
+        id,
+        lsp_server::ErrorCode::InvalidParams as i32,
+        "File was not yet parsed.".to_owned(),
+    );
     lock.sender.send(Message::Response(resp))?;
     Ok(None)
 }

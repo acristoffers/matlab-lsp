@@ -30,8 +30,8 @@ use anyhow::Result;
 use log::{debug, error, info};
 use lsp_server::{Connection, Message};
 use lsp_types::{
-    HoverProviderCapability, OneOf, PositionEncodingKind, TextDocumentSyncCapability,
-    TextDocumentSyncKind, TextDocumentSyncOptions,
+    FoldingRangeProviderCapability, HoverProviderCapability, OneOf, PositionEncodingKind,
+    TextDocumentSyncCapability, TextDocumentSyncKind, TextDocumentSyncOptions,
 };
 use lsp_types::{SaveOptions, ServerCapabilities};
 use process_alive::Pid;
@@ -102,6 +102,7 @@ fn start_server(arguments: Arguments) -> Result<ExitCode> {
         rename_provider: Some(OneOf::Left(true)),
         hover_provider: Some(HoverProviderCapability::Simple(true)),
         document_highlight_provider: Some(OneOf::Left(true)),
+        folding_range_provider: Some(FoldingRangeProviderCapability::Simple(true)),
         ..Default::default()
     })?;
     let initialization_params = connection.initialize(server_capabilities)?;
