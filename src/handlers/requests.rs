@@ -6,12 +6,13 @@
 
 use std::collections::HashMap;
 use std::process::ExitCode;
-use std::sync::Arc;
+use std::sync::MutexGuard;
 
 use crate::analysis::hover::hover_for_symbol;
 use crate::analysis::references::find_references_to_symbol;
 use crate::analysis::semantic::semantic_tokens;
 use crate::code_loc;
+use crate::session_state::SessionState;
 use crate::types::{PointToPos, PosToPoint, Range};
 use crate::utils::{lock_mutex, SessionStateArc};
 
@@ -33,59 +34,58 @@ use tree_sitter::{Point, Query, QueryCursor};
 
 pub fn handle_request(state: SessionStateArc, request: &Request) -> Result<Option<ExitCode>> {
     debug!("Handling a request.");
-    let mut dispatcher = Dispatcher::new(state, request);
+    let mut lock = lock_mutex(&state)?;
+    if lock.client_requested_shutdown {
+        let resp = Response::new_err(
+            request.id.clone(),
+            lsp_server::ErrorCode::InvalidRequest as i32,
+            "Shutdown already requested.".to_owned(),
+        );
+        lock.sender.send(Message::Response(resp))?;
+        return Err(anyhow!("Got a request after a shutdown."));
+    }
+    let mut dispatcher = Dispatcher::new(request);
     dispatcher
-        .handle::<Formatting>(handle_formatting)?
-        .handle::<GotoDefinition>(handle_goto_definition)?
-        .handle::<References>(handle_references)?
-        .handle::<Rename>(handle_rename)?
-        .handle::<HoverRequest>(handle_hover)?
-        .handle::<DocumentHighlightRequest>(handle_highlight)?
-        .handle::<FoldingRangeRequest>(handle_folding)?
-        .handle::<SemanticTokensFullRequest>(handle_semantic)?
-        .handle::<Shutdown>(handle_shutdown)?
+        .handle::<Formatting>(&mut lock, handle_formatting)?
+        .handle::<GotoDefinition>(&mut lock, handle_goto_definition)?
+        .handle::<References>(&mut lock, handle_references)?
+        .handle::<Rename>(&mut lock, handle_rename)?
+        .handle::<HoverRequest>(&mut lock, handle_hover)?
+        .handle::<DocumentHighlightRequest>(&mut lock, handle_highlight)?
+        .handle::<FoldingRangeRequest>(&mut lock, handle_folding)?
+        .handle::<SemanticTokensFullRequest>(&mut lock, handle_semantic)?
+        .handle::<Shutdown>(&mut lock, handle_shutdown)?
         .finish()
 }
 
 struct Dispatcher<'a> {
-    state: SessionStateArc,
     request: &'a Request,
     result: Option<Result<Option<ExitCode>>>,
 }
 
+type Callback<P> =
+    fn(&mut MutexGuard<'_, &mut SessionState>, RequestId, P) -> Result<Option<ExitCode>>;
+
 impl Dispatcher<'_> {
-    fn new(state: SessionStateArc, request: &Request) -> Dispatcher {
+    fn new(request: &Request) -> Dispatcher {
         Dispatcher {
-            result: None,
             request,
-            state,
+            result: None,
         }
     }
 
     fn handle<R>(
         &mut self,
-        function: fn(SessionStateArc, RequestId, R::Params) -> Result<Option<ExitCode>>,
+        state: &mut MutexGuard<'_, &mut SessionState>,
+        function: Callback<R::Params>,
     ) -> Result<&mut Self>
     where
         R: lsp_types::request::Request,
         R::Params: serde::de::DeserializeOwned,
     {
-        let state = lock_mutex(&self.state)?;
-        if state.client_requested_shutdown {
-            self.result = Some(Err(anyhow!("Got a request after a shutdown.")));
-            let resp = Response::new_err(
-                self.request.id.clone(),
-                lsp_server::ErrorCode::InvalidRequest as i32,
-                "Shutdown already requested.".to_owned(),
-            );
-            state.sender.send(Message::Response(resp))?;
-            drop(state);
-            return Ok(self);
-        }
-        drop(state);
         match cast::<R>(self.request.clone()) {
             Ok((id, params)) => {
-                self.result = Some(function(Arc::clone(&self.state), id, params));
+                self.result = Some(function(state, id, params));
             }
             Err(err @ ExtractError::JsonError { .. }) => {
                 self.result = Some(Err(anyhow!("JsonError: {err:?}")));
@@ -114,12 +114,11 @@ where
 }
 
 fn handle_formatting(
-    state: SessionStateArc,
+    state: &mut MutexGuard<'_, &mut SessionState>,
     id: RequestId,
     params: DocumentFormattingParams,
 ) -> Result<Option<ExitCode>> {
     info!("Formatting {}", params.text_document.uri.as_str());
-    let mut state = lock_mutex(&state)?;
     let file = state
         .files
         .get_mut(&params.text_document.uri.path().to_string())
@@ -154,11 +153,10 @@ fn handle_formatting(
 }
 
 fn handle_goto_definition(
-    state: SessionStateArc,
+    state: &mut MutexGuard<'_, &mut SessionState>,
     id: RequestId,
     params: GotoDefinitionParams,
 ) -> Result<Option<ExitCode>> {
-    let state = lock_mutex(&state)?;
     let uri = params.text_document_position_params.text_document.uri;
     let file = uri.path();
     let loc = params.text_document_position_params.position;
@@ -237,13 +235,12 @@ fn handle_goto_definition(
 }
 
 fn handle_references(
-    state: SessionStateArc,
+    state: &mut MutexGuard<'_, &mut SessionState>,
     id: RequestId,
     params: ReferenceParams,
 ) -> Result<Option<ExitCode>> {
     info!("Received textDocument/references.");
     let include_declaration = params.context.include_declaration;
-    let lock = lock_mutex(&state)?;
     let path = params
         .text_document_position
         .text_document
@@ -251,25 +248,24 @@ fn handle_references(
         .path()
         .to_string();
     let loc = params.text_document_position.position.to_point();
-    if let Ok(rs) = find_references_to_symbol(&lock, path, loc, include_declaration) {
+    if let Ok(rs) = find_references_to_symbol(state, path, loc, include_declaration) {
         let rs: Vec<&Location> = rs.iter().map(|(v, _)| v).collect();
         let result = serde_json::to_value(rs)?;
         let resp = Response::new_ok(id, result);
-        let _ = lock.sender.send(resp.into());
+        let _ = state.sender.send(resp.into());
     } else {
         let resp = Response::new_err(id, 0, "Could not find file.".into());
-        let _ = lock.sender.send(resp.into());
+        let _ = state.sender.send(resp.into());
     }
     Ok(None)
 }
 
 fn handle_rename(
-    state: SessionStateArc,
+    state: &mut MutexGuard<'_, &mut SessionState>,
     id: RequestId,
     params: RenameParams,
 ) -> Result<Option<ExitCode>> {
     info!("Received textDocument/references.");
-    let lock = lock_mutex(&state)?;
     let path = params
         .text_document_position
         .text_document
@@ -285,10 +281,10 @@ fn handle_rename(
             lsp_server::ErrorCode::InvalidParams as i32,
             "The name is not a valid identifier.".to_owned(),
         );
-        lock.sender.send(Message::Response(resp))?;
+        state.sender.send(Message::Response(resp))?;
         return Ok(None);
     }
-    let references = find_references_to_symbol(&lock, path, loc, true)?;
+    let references = find_references_to_symbol(state, path, loc, true)?;
     let mut ws_edit: HashMap<Url, Vec<TextEdit>> = HashMap::new();
     for (reference, _) in references {
         let uri = reference.uri;
@@ -303,17 +299,16 @@ fn handle_rename(
     }
     let ws_edit = WorkspaceEdit::new(ws_edit);
     let resp = Response::new_ok(id, ws_edit);
-    lock.sender.send(Message::Response(resp))?;
+    state.sender.send(Message::Response(resp))?;
     Ok(None)
 }
 
 fn handle_hover(
-    state: SessionStateArc,
+    state: &mut MutexGuard<'_, &mut SessionState>,
     id: RequestId,
     params: HoverParams,
 ) -> Result<Option<ExitCode>> {
     info!("Received textDocument/hover.");
-    let lock = lock_mutex(&state)?;
     let path = params
         .text_document_position_params
         .text_document
@@ -321,8 +316,8 @@ fn handle_hover(
         .path()
         .to_string();
     let loc = params.text_document_position_params.position.to_point();
-    if let Some((md, plain)) = hover_for_symbol(&lock, path, loc)? {
-        if let Some(td) = &lock.workspace_params.capabilities.text_document {
+    if let Some((md, plain)) = hover_for_symbol(state, path, loc)? {
+        if let Some(td) = &state.workspace_params.capabilities.text_document {
             if let Some(hover) = &td.hover {
                 if let Some(cf) = &hover.content_format {
                     if cf.contains(&MarkupKind::Markdown) {
@@ -331,7 +326,7 @@ fn handle_hover(
                             range: None,
                         };
                         let resp = Response::new_ok(id, response);
-                        lock.sender.send(Message::Response(resp))?;
+                        state.sender.send(Message::Response(resp))?;
                         return Ok(None);
                     }
                 }
@@ -342,21 +337,20 @@ fn handle_hover(
             range: None,
         };
         let resp = Response::new_ok(id, response);
-        lock.sender.send(Message::Response(resp))?;
+        state.sender.send(Message::Response(resp))?;
     } else {
         let resp = Response::new_ok(id, ());
-        lock.sender.send(Message::Response(resp))?;
+        state.sender.send(Message::Response(resp))?;
     }
     Ok(None)
 }
 
 fn handle_highlight(
-    state: SessionStateArc,
+    state: &mut MutexGuard<'_, &mut SessionState>,
     id: RequestId,
     params: DocumentHighlightParams,
 ) -> Result<Option<ExitCode>> {
     info!("Received textDocument/highlight.");
-    let lock = lock_mutex(&state)?;
     let path = params
         .text_document_position_params
         .text_document
@@ -364,7 +358,7 @@ fn handle_highlight(
         .path()
         .to_string();
     let loc = params.text_document_position_params.position.to_point();
-    let locs = find_references_to_symbol(&lock, path.clone(), loc, true)?;
+    let locs = find_references_to_symbol(state, path.clone(), loc, true)?;
     let mut response = vec![];
     for (location, kind) in locs {
         if location.uri.path() == path {
@@ -376,19 +370,18 @@ fn handle_highlight(
         }
     }
     let resp = Response::new_ok(id, response);
-    lock.sender.send(Message::Response(resp))?;
+    state.sender.send(Message::Response(resp))?;
     Ok(None)
 }
 
 fn handle_folding(
-    state: SessionStateArc,
+    state: &mut MutexGuard<'_, &mut SessionState>,
     id: RequestId,
     params: FoldingRangeParams,
 ) -> Result<Option<ExitCode>> {
     info!("Received textDocument/foldingRange.");
-    let lock = lock_mutex(&state)?;
     let path = params.text_document.uri.path().to_string();
-    if let Some(file) = lock.files.get(&path) {
+    if let Some(file) = state.files.get(&path) {
         let file_lock = lock_mutex(file)?;
         if let Some(tree) = &file_lock.tree {
             let root = tree.root_node();
@@ -413,7 +406,7 @@ fn handle_folding(
                 resp.push(fold);
             }
             let resp = Response::new_ok(id, resp);
-            lock.sender.send(Message::Response(resp))?;
+            state.sender.send(Message::Response(resp))?;
             return Ok(None);
         }
     }
@@ -422,19 +415,18 @@ fn handle_folding(
         lsp_server::ErrorCode::InvalidParams as i32,
         "File was not yet parsed.".to_owned(),
     );
-    lock.sender.send(Message::Response(resp))?;
+    state.sender.send(Message::Response(resp))?;
     Ok(None)
 }
 
 fn handle_semantic(
-    state: SessionStateArc,
+    state: &mut MutexGuard<'_, &mut SessionState>,
     id: RequestId,
     params: SemanticTokensParams,
 ) -> Result<Option<ExitCode>> {
     info!("Received textDocument/semanticTokens/full.");
-    let lock = lock_mutex(&state)?;
     let path = params.text_document.uri.path().to_string();
-    if let Some(file) = lock.files.get(&path) {
+    if let Some(file) = state.files.get(&path) {
         let parsed_file = lock_mutex(file)?;
         let response = semantic_tokens(&parsed_file)?;
         let sts = SemanticTokens {
@@ -442,21 +434,24 @@ fn handle_semantic(
             data: response,
         };
         let resp = Response::new_ok(id, sts);
-        lock.sender.send(Message::Response(resp))?;
+        state.sender.send(Message::Response(resp))?;
     } else {
         let resp = Response::new_err(
             id,
             lsp_server::ErrorCode::InvalidParams as i32,
             "File not found.".to_owned(),
         );
-        lock.sender.send(Message::Response(resp))?;
+        state.sender.send(Message::Response(resp))?;
     }
     Ok(None)
 }
 
-fn handle_shutdown(state: SessionStateArc, id: RequestId, _params: ()) -> Result<Option<ExitCode>> {
+fn handle_shutdown(
+    state: &mut MutexGuard<'_, &mut SessionState>,
+    id: RequestId,
+    _params: (),
+) -> Result<Option<ExitCode>> {
     info!("Received shutdown request.");
-    let mut state = lock_mutex(&state)?;
     state.client_requested_shutdown = true;
     state.rescan_all_files = false;
     state.rescan_open_files = false;

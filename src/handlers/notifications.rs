@@ -6,10 +6,11 @@
 
 use std::path::Path;
 use std::process::ExitCode;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::analysis::defref;
 use crate::parsed_file::{FileType, ParsedFile};
+use crate::session_state::SessionState;
 use crate::types::{Range, Workspace};
 use crate::utils::{lock_mutex, read_to_string, rescan_file, SessionStateArc};
 
@@ -30,41 +31,43 @@ pub fn handle_notification(
     state: SessionStateArc,
     notification: &Notification,
 ) -> Result<Option<ExitCode>> {
-    let mut dispatcher = Dispatcher::new(Arc::clone(&state), notification);
+    let mut lock = lock_mutex(&state)?;
+    let mut dispatcher = Dispatcher::new(notification);
     dispatcher
-        .handle::<DidOpenTextDocument>(handle_text_document_did_open)
-        .handle::<DidCloseTextDocument>(handle_text_document_did_close)
-        .handle::<DidChangeTextDocument>(handle_text_document_did_change)
-        .handle::<DidSaveTextDocument>(handle_text_document_did_save)
-        .handle::<Exit>(handle_exit)
+        .handle::<DidOpenTextDocument>(&mut lock, handle_text_document_did_open)
+        .handle::<DidCloseTextDocument>(&mut lock, handle_text_document_did_close)
+        .handle::<DidChangeTextDocument>(&mut lock, handle_text_document_did_change)
+        .handle::<DidSaveTextDocument>(&mut lock, handle_text_document_did_save)
+        .handle::<Exit>(&mut lock, handle_exit)
         .finish()
 }
 
-struct Dispatcher<'a> {
-    state: SessionStateArc,
-    notification: &'a Notification,
+struct Dispatcher {
+    notification: Notification,
     result: Option<Result<Option<ExitCode>>>,
 }
 
-impl Dispatcher<'_> {
-    fn new(state: SessionStateArc, request: &Notification) -> Dispatcher {
+type Callback<P> = fn(&mut MutexGuard<'_, &mut SessionState>, P) -> Result<Option<ExitCode>>;
+
+impl Dispatcher {
+    fn new(request: &Notification) -> Dispatcher {
         Dispatcher {
+            notification: request.clone(),
             result: None,
-            notification: request,
-            state,
         }
     }
 
     fn handle<N>(
         &mut self,
-        function: fn(SessionStateArc, N::Params) -> Result<Option<ExitCode>>,
+        state: &mut MutexGuard<'_, &mut SessionState>,
+        function: Callback<N::Params>,
     ) -> &mut Self
     where
         N: lsp_types::notification::Notification,
         N::Params: serde::de::DeserializeOwned,
     {
         let result = match cast::<N>(self.notification.clone()) {
-            Ok(params) => function(Arc::clone(&self.state), params),
+            Ok(params) => function(state, params),
             Err(err @ ExtractError::JsonError { .. }) => Err(anyhow!("JsonError: {err:?}")),
             Err(ExtractError::MethodMismatch(req)) => Err(anyhow!("MethodMismatch: {req:?}")),
         };
@@ -89,23 +92,22 @@ where
 }
 
 fn handle_text_document_did_open(
-    state: SessionStateArc,
+    state: &mut MutexGuard<'_, &mut SessionState>,
     params: DidOpenTextDocumentParams,
 ) -> Result<Option<ExitCode>> {
     info!(
         "documentText/didOpen: {}",
         params.text_document.uri.as_str()
     );
-    let mut lock = lock_mutex(&state)?;
     let contents = read_to_string(&mut params.text_document.text.as_bytes(), None)?.0;
     let path = params.text_document.uri.path().to_string();
-    if let Some(file) = lock.files.get(&path) {
+    if let Some(file) = state.files.get(&path) {
         let mut lock_file = lock_mutex(file)?;
         lock_file.open = true;
         lock_file.contents = contents;
         drop(lock_file);
         let file = Arc::clone(file);
-        rescan_file(&mut lock, file)?;
+        rescan_file(state, file)?;
         return Ok(None);
     }
     let path_p = Path::new(&path);
@@ -154,27 +156,22 @@ fn handle_text_document_did_open(
     } else {
         "".to_string()
     };
-    defref::analyze(&lock, Arc::clone(&parsed_file))?;
+    defref::analyze(state, Arc::clone(&parsed_file))?;
     let mut file_lock = lock_mutex(&parsed_file)?;
-    lock.files.insert(key.clone(), Arc::clone(&parsed_file));
-    ParsedFile::define_type(
-        &mut lock,
-        Arc::clone(&parsed_file),
-        &mut file_lock,
-        namespace,
-    )?;
+    state.files.insert(key.clone(), Arc::clone(&parsed_file));
+    ParsedFile::define_type(state, Arc::clone(&parsed_file), &mut file_lock, namespace)?;
     debug!("Inserted {key} into the store");
-    lock.sender.send(Message::Request(lsp_server::Request {
-        id: RequestId::from(lock.request_id),
+    state.sender.send(Message::Request(lsp_server::Request {
+        id: RequestId::from(state.request_id),
         method: SemanticTokensRefresh::METHOD.to_string(),
         params: serde_json::to_value(())?,
     }))?;
-    lock.request_id += 1;
+    state.request_id += 1;
     Ok(None)
 }
 
 fn handle_text_document_did_close(
-    state: SessionStateArc,
+    state: &mut MutexGuard<'_, &mut SessionState>,
     params: DidCloseTextDocumentParams,
 ) -> Result<Option<ExitCode>> {
     info!(
@@ -183,25 +180,22 @@ fn handle_text_document_did_close(
     );
     let path = params.text_document.uri.path();
     if params.text_document.uri.scheme() == "file" && std::path::Path::new(path).exists() {
-        let mut state_lock = lock_mutex(&state)?;
-        if let Some(file) = state_lock.files.get(&path.to_string()) {
+        if let Some(file) = state.files.get(&path.to_string()) {
             let mut lock_file = lock_mutex(file)?;
             lock_file.open = false;
             drop(lock_file);
             let file = Arc::clone(file);
-            rescan_file(&mut state_lock, file)?;
-            state_lock.rescan_all_files = true;
+            rescan_file(state, file)?;
+            state.rescan_all_files = true;
         }
     } else {
-        lock_mutex(&state)?
-            .files
-            .remove(params.text_document.uri.as_str());
+        state.files.remove(params.text_document.uri.as_str());
     }
     Ok(None)
 }
 
 fn handle_text_document_did_change(
-    state: SessionStateArc,
+    state: &mut MutexGuard<'_, &mut SessionState>,
     params: DidChangeTextDocumentParams,
 ) -> Result<Option<ExitCode>> {
     info!(
@@ -209,7 +203,7 @@ fn handle_text_document_did_change(
         params.text_document.uri.as_str(),
     );
     let file_path = params.text_document.uri.path().to_string();
-    let parsed_file = lock_mutex(&state)?
+    let parsed_file = state
         .files
         .get(&file_path)
         .ok_or(anyhow!("No such file: {file_path}"))?
@@ -241,20 +235,19 @@ fn handle_text_document_did_change(
             None => lock_mutex(&parsed_file)?.contents = change.text,
         }
     }
-    let mut lock = lock_mutex(&state)?;
-    rescan_file(&mut lock, parsed_file)?;
-    lock.sender.send(Message::Request(lsp_server::Request {
-        id: RequestId::from(lock.request_id),
+    rescan_file(state, parsed_file)?;
+    state.sender.send(Message::Request(lsp_server::Request {
+        id: RequestId::from(state.request_id),
         method: SemanticTokensRefresh::METHOD.to_string(),
         params: serde_json::to_value(())?,
     }))?;
-    lock.request_id += 1;
-    lock.rescan_open_files = true;
+    state.request_id += 1;
+    state.rescan_open_files = true;
     Ok(None)
 }
 
 fn handle_text_document_did_save(
-    state: SessionStateArc,
+    state: &mut MutexGuard<'_, &mut SessionState>,
     params: DidSaveTextDocumentParams,
 ) -> Result<Option<ExitCode>> {
     info!(
@@ -262,8 +255,7 @@ fn handle_text_document_did_save(
         params.text_document.uri.as_str(),
     );
     let file_path = params.text_document.uri.path().to_string();
-    let mut lock = lock_mutex(&state)?;
-    let parsed_file = lock
+    let parsed_file = state
         .files
         .get(&file_path)
         .ok_or(anyhow!("No such file: {file_path}"))?
@@ -272,24 +264,25 @@ fn handle_text_document_did_save(
         let mut parsed_file_lock = lock_mutex(&parsed_file)?;
         parsed_file_lock.contents = content;
         drop(parsed_file_lock);
-        rescan_file(&mut lock, parsed_file)?;
+        rescan_file(state, parsed_file)?;
     }
-    lock.sender.send(Message::Request(lsp_server::Request {
-        id: RequestId::from(lock.request_id),
+    state.sender.send(Message::Request(lsp_server::Request {
+        id: RequestId::from(state.request_id),
         method: SemanticTokensRefresh::METHOD.to_string(),
         params: serde_json::to_value(())?,
     }))?;
-    lock.request_id += 1;
-    lock.rescan_all_files = true;
+    state.request_id += 1;
+    state.rescan_all_files = true;
     Ok(None)
 }
 
-fn handle_exit(state: SessionStateArc, _params: ()) -> Result<Option<ExitCode>> {
+fn handle_exit(
+    state: &mut MutexGuard<'_, &mut SessionState>,
+    _params: (),
+) -> Result<Option<ExitCode>> {
     info!("Got Exit notification.");
-    if let Ok(state) = lock_mutex(&state) {
-        if !state.client_requested_shutdown {
-            return Ok(Some(ExitCode::from(1)));
-        }
+    if !state.client_requested_shutdown {
+        return Ok(Some(ExitCode::from(1)));
     }
     Ok(Some(ExitCode::SUCCESS))
 }
