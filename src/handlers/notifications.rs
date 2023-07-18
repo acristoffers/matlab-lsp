@@ -158,9 +158,9 @@ fn handle_text_document_did_open(
         "".to_string()
     };
     defref::analyze(state, Arc::clone(&parsed_file))?;
-    let mut file_lock = parsed_file.borrow_mut();
+    let mut pf_mr = parsed_file.borrow_mut();
     state.files.insert(key.clone(), Arc::clone(&parsed_file));
-    ParsedFile::define_type(state, Arc::clone(&parsed_file), &mut file_lock, namespace)?;
+    ParsedFile::define_type(state, Arc::clone(&parsed_file), &mut pf_mr, namespace)?;
     debug!("Inserted {key} into the store");
     state.sender.send(Message::Request(lsp_server::Request {
         id: RequestId::from(state.request_id),
@@ -260,9 +260,9 @@ fn handle_text_document_did_save(
         .ok_or(anyhow!("No such file: {file_path}"))?
         .clone();
     if let Some(content) = params.text {
-        let mut parsed_file_lock = parsed_file.borrow_mut();
-        parsed_file_lock.contents = content;
-        drop(parsed_file_lock);
+        let mut pf_mr = parsed_file.borrow_mut();
+        pf_mr.contents = content;
+        drop(pf_mr);
         rescan_file(state, parsed_file)?;
     }
     state.sender.send(Message::Request(lsp_server::Request {

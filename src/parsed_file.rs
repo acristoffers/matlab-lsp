@@ -114,11 +114,11 @@ impl ParsedFile {
     pub fn define_type(
         state: &mut MutexGuard<'_, &mut SessionState>,
         parsed_file: Arc<AtomicRefCell<ParsedFile>>,
-        parsed_file_lock: &mut AtomicRefMut<'_, ParsedFile>,
+        pf_rw: &mut AtomicRefMut<'_, ParsedFile>,
         namespace: String,
     ) -> Result<()> {
         debug!("Defining the type of a file.");
-        if let Some(tree) = &parsed_file_lock.tree {
+        if let Some(tree) = &pf_rw.tree {
             debug!("File has a tree, continuing...");
             let tree = tree.clone();
             let root = tree.root_node();
@@ -130,9 +130,8 @@ impl ParsedFile {
                         "class_definition" => {
                             debug!("It's a class definition. Parsing.");
                             if let Some(name) = child.child_by_field_name("name") {
-                                let class_name = name
-                                    .utf8_text(parsed_file_lock.contents.as_bytes())?
-                                    .to_string();
+                                let class_name =
+                                    name.utf8_text(pf_rw.contents.as_bytes())?.to_string();
                                 let qualified_name = if !namespace.is_empty() {
                                     namespace + "." + class_name.as_str()
                                 } else {
@@ -156,7 +155,7 @@ impl ParsedFile {
                         }
                         "function_definition" => {
                             debug!("It's a function definition. Parsing.");
-                            let fn_sig = function_signature(parsed_file_lock, child)?;
+                            let fn_sig = function_signature(pf_rw, child)?;
                             debug!("Got signature for {}", fn_sig.name);
                             let qualified_name = if !namespace.is_empty() {
                                 namespace + "." + fn_sig.name.as_str()
@@ -180,9 +179,9 @@ impl ParsedFile {
                         }
                         _ => {
                             let qualified_name = if !namespace.is_empty() {
-                                namespace + "." + parsed_file_lock.name.as_str()
+                                namespace + "." + pf_rw.name.as_str()
                             } else {
-                                parsed_file_lock.name.clone()
+                                pf_rw.name.clone()
                             };
                             state
                                 .workspace
@@ -191,16 +190,13 @@ impl ParsedFile {
                             FileType::MScript
                         }
                     };
-                    debug!(
-                        "Defined {} to be of type {:#?}",
-                        parsed_file_lock.path, file_type
-                    );
-                    parsed_file_lock.file_type = file_type;
+                    debug!("Defined {} to be of type {:#?}", pf_rw.path, file_type);
+                    pf_rw.file_type = file_type;
                 }
             }
             Ok(())
         } else {
-            error!("File has no tree: {}", parsed_file_lock.path.as_str());
+            error!("File has no tree: {}", pf_rw.path.as_str());
             Err(anyhow!("File has no tree"))
         }
     }

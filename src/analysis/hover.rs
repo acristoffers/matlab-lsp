@@ -27,9 +27,9 @@ pub fn hover_for_symbol(
     if let Some(file) = state.files.get(&file) {
         let pf_ref = file.borrow_mut();
         for reference in &pf_ref.workspace.references {
-            let r_lock = reference.borrow();
-            if r_lock.loc.contains(loc) {
-                match &r_lock.target {
+            let r_ref = reference.borrow();
+            if r_ref.loc.contains(loc) {
+                match &r_ref.target {
                     crate::types::ReferenceTarget::Class(cl) => {
                         return hover_simple_info(format!("Class: {}", cl.borrow().name));
                     }
@@ -38,7 +38,7 @@ pub fn hover_for_symbol(
                     }
                     crate::types::ReferenceTarget::Function(function) => {
                         let function = Arc::clone(function);
-                        drop(r_lock);
+                        drop(r_ref);
                         drop(pf_ref);
                         return hover_function(function);
                     }

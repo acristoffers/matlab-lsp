@@ -102,12 +102,12 @@ fn find_references_to_class<'a>(
             .iter()
             .map(|r| (path.clone(), r));
         for (r_path, reference) in f_refs {
-            let r_lock = reference.borrow();
-            if let ReferenceTarget::Class(target) = &r_lock.target {
+            let r_ref = reference.borrow();
+            if let ReferenceTarget::Class(target) = &r_ref.target {
                 if Arc::ptr_eq(&class, target) {
                     let path = String::from("file://") + r_path.as_str();
                     let uri = Url::parse(path.as_str())?;
-                    let location = Location::new(uri.clone(), r_lock.loc.into());
+                    let location = Location::new(uri.clone(), r_ref.loc.into());
                     refs.push((location, DocumentHighlightKind::TEXT));
                 }
             }
@@ -189,7 +189,7 @@ fn find_references_to_script<'a>(
     Ok(refs)
 }
 
-fn find_references_to_variable<'a>(
+fn find_references_to_variable(
     parsed_file: &AtomicRefMut<'_, ParsedFile>,
     variable: Arc<AtomicRefCell<VariableDefinition>>,
     inc_dec: bool,
@@ -214,7 +214,7 @@ fn find_references_to_variable<'a>(
     Ok(refs)
 }
 
-fn find_references_to_namespace<'a>(
+fn find_references_to_namespace(
     parsed_file: &AtomicRefMut<'_, ParsedFile>,
     ns: Arc<AtomicRefCell<Namespace>>,
 ) -> Result<Vec<(Location, DocumentHighlightKind)>> {
@@ -233,7 +233,7 @@ fn find_references_to_namespace<'a>(
     Ok(refs)
 }
 
-fn find_references_to_field<'a>(
+fn find_references_to_field(
     parsed_file: &AtomicRefMut<'_, ParsedFile>,
     name: String,
     pos: Point,

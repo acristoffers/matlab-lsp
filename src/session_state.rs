@@ -74,8 +74,8 @@ impl SessionState {
             if file.borrow().open {
                 let file2 = Arc::clone(file);
                 rescan_file(state, file2)?;
-                let mut pf_mr = file.borrow_mut();
-                diagnostics::diagnotiscs(state, &mut pf_mr)?;
+                let pf_mr = file.borrow_mut();
+                diagnostics::diagnotiscs(state, &pf_mr)?;
                 send_progress_report(
                     state,
                     0,

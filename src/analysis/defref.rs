@@ -94,10 +94,10 @@ fn analyze_impl(
         let mut definition = Arc::new(AtomicRefCell::new(definition));
         // Does this signature already exist?
         for (f_name, function) in &state.workspace.functions {
-            let f_lock = function.borrow_mut();
+            let f_mr = function.borrow_mut();
             if *f_name == signature.name
-                && f_lock.signature.name_range == signature.name_range
-                && Arc::ptr_eq(&parsed_file_arc, &f_lock.parsed_file)
+                && f_mr.signature.name_range == signature.name_range
+                && Arc::ptr_eq(&parsed_file_arc, &f_mr.parsed_file)
             {
                 definition = Arc::clone(function);
                 break;
@@ -711,12 +711,12 @@ fn ref_to_var(
     };
     for (_, ws) in scopes.iter().flat_map(|i| functions.get(i)) {
         for v in ws.variables.iter().rev() {
-            let v_lock = v.borrow();
-            if v_lock.name == name {
-                if is_assignment && p_range.fully_contains(v_lock.loc) {
+            let v_ref = v.borrow();
+            if v_ref.name == name {
+                if is_assignment && p_range.fully_contains(v_ref.loc) {
                     continue;
                 }
-                if let Some(ndef) = node_at_pos(parsed_file, v_lock.loc.start) {
+                if let Some(ndef) = node_at_pos(parsed_file, v_ref.loc.start) {
                     if !is_in_soft_scope(node, ndef) {
                         continue;
                     }
@@ -741,12 +741,12 @@ fn ref_to_var(
             .all(|(n, _)| n.kind() == "lambda")
     {
         for v in workspace.variables.iter().rev() {
-            let v_lock = v.borrow();
-            if v_lock.name == name {
-                if is_assignment && p_range.fully_contains(v_lock.loc) {
+            let v_ref = v.borrow();
+            if v_ref.name == name {
+                if is_assignment && p_range.fully_contains(v_ref.loc) {
                     continue;
                 }
-                if let Some(ndef) = node_at_pos(parsed_file, v_lock.loc.start) {
+                if let Some(ndef) = node_at_pos(parsed_file, v_ref.loc.start) {
                     if !is_in_soft_scope(node, ndef) {
                         continue;
                     }
@@ -771,8 +771,8 @@ fn ref_to_fn_in_ws<'a>(
 ) -> Result<Vec<Reference>> {
     let mut references = vec![];
     for fn_def in state.workspace.functions.values() {
-        let f_lock = fn_def.borrow();
-        if f_lock.name == name && (!f_lock.path.contains('.') || pkg) {
+        let f_ref = fn_def.borrow();
+        if f_ref.name == name && (!f_ref.path.contains('.') || pkg) {
             let f_ref = Reference {
                 loc: node.range().into(),
                 name: name.clone(),
@@ -782,8 +782,8 @@ fn ref_to_fn_in_ws<'a>(
         }
     }
     for cl_def in state.workspace.classes.values() {
-        let c_lock = cl_def.borrow();
-        if c_lock.name == name && (!c_lock.path.contains('.') || pkg) {
+        let c_ref = cl_def.borrow();
+        if c_ref.name == name && (!c_ref.path.contains('.') || pkg) {
             let c_ref = Reference {
                 loc: node.range().into(),
                 name: name.clone(),
@@ -864,8 +864,8 @@ fn def_var(
                 if let Some(scope) = scopes.first() {
                     if let Some((_, ws)) = functions.get(scope) {
                         for var in &ws.variables {
-                            let v_lock = var.borrow();
-                            if v_lock.name == name && v_lock.loc.contains(p) {
+                            let v_ref = var.borrow();
+                            if v_ref.name == name && v_ref.loc.contains(p) {
                                 let reference = Reference {
                                     loc: node.range().into(),
                                     name,
