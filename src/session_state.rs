@@ -45,7 +45,6 @@ impl SessionState {
                         error!("Error scanning open files: {err}");
                     }
                     lock.rescan_open_files = false;
-                    continue;
                 }
                 if lock.rescan_all_files {
                     debug!("Rescanning all files.");
@@ -53,7 +52,6 @@ impl SessionState {
                         error!("Error scanning all files: {err}");
                     }
                     lock.rescan_all_files = false;
-                    continue;
                 }
                 drop(lock);
                 std::thread::sleep(std::time::Duration::from_secs(1));
