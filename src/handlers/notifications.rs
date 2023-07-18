@@ -187,7 +187,7 @@ fn handle_text_document_did_close(
             drop(pf_mr);
             let file = Arc::clone(file);
             rescan_file(state, file)?;
-            state.rescan_all_files = true;
+            state.rescan_all_files = state.files.iter().any(|(_, f)| f.borrow().open);
         }
     } else {
         state.files.remove(params.text_document.uri.as_str());
