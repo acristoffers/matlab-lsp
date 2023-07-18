@@ -71,7 +71,7 @@ fn semantic_tokens_impl(
             "comment" => tokens.push(SemanticToken {
                 delta_line: range.start.line,
                 delta_start: range.start.character,
-                length: range.end.character - range.start.character,
+                length: (node.byte_range().end - node.byte_range().start).try_into()?,
                 token_type: token_id(SemanticTokenType::COMMENT),
                 token_modifiers_bitset: 0,
             }),
