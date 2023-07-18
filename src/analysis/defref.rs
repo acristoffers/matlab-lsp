@@ -738,7 +738,13 @@ fn ref_to_var(
     // If scope is not empty, we cannot look at the global workspace as this is a private function
     // of a script, and therefore scoped. If this is a nested function, everything it can see was
     // covered alread in the previous for loop.
-    if scopes.is_empty() {
+    // Except for lambdas.
+    if scopes.is_empty()
+        || scopes
+            .iter()
+            .flat_map(|s| functions.get(s))
+            .all(|(n, _)| n.kind() == "lambda")
+    {
         for v in workspace.variables.iter().rev() {
             let v_lock = lock_mutex(v)?;
             if v_lock.name == name {
