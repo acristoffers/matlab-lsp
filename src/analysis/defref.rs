@@ -362,14 +362,25 @@ fn fncall_capture_impl(
                 if let Some(fref) = fs.first() {
                     let fref = Arc::new(Mutex::new(fref.clone()));
                     workspace.references.push(fref);
-                } else if parent_of_kind("assignment", *node).is_none() {
-                    let r = Reference {
-                        loc: name_node.range().into(),
-                        name: fname.clone(),
-                        target: ReferenceTarget::UnknownFunction,
+                } else {
+                    let right_def = if let Some(parent) = parent_of_kind("assignment", *node) {
+                        if let Some(right) = parent.child_by_field_name("right") {
+                            Range::from(right.range()).contains(node.start_position())
+                        } else {
+                            true
+                        }
+                    } else {
+                        true
                     };
-                    let fref = Arc::new(Mutex::new(r));
-                    workspace.references.push(fref);
+                    if right_def {
+                        let r = Reference {
+                            loc: name_node.range().into(),
+                            name: fname.clone(),
+                            target: ReferenceTarget::UnknownFunction,
+                        };
+                        let fref = Arc::new(Mutex::new(r));
+                        workspace.references.push(fref);
+                    }
                 }
             }
         }
