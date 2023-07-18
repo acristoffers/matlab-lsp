@@ -212,7 +212,7 @@ fn analyze_impl(
                     if let Some(v) = vs.first() {
                         let vref = Arc::new(Mutex::new(v.clone()));
                         workspace.references.push(vref);
-                    } else if parent_of_kind("assignment", *node).is_none() {
+                    } else {
                         let vref = Reference {
                             loc: node.range().into(),
                             name,
