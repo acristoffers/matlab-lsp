@@ -5,7 +5,7 @@
  */
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, MutexGuard};
 
 use crate::code_loc;
 use crate::parsed_file::ParsedFile;
@@ -13,20 +13,21 @@ use crate::session_state::{Namespace, SessionState};
 use crate::types::{
     FunctionDefinition, Range, Reference, ReferenceTarget, VariableDefinition, Workspace,
 };
-use crate::utils::{function_signature, lock_mutex};
+use crate::utils::function_signature;
 use anyhow::{anyhow, Result};
+use atomic_refcell::{AtomicRefCell, AtomicRefMut};
 use itertools::Itertools;
 use log::{debug, error, info};
 use tree_sitter::{Node, Point, Query, QueryCursor};
 
 pub fn analyze(
     state: &MutexGuard<'_, &mut SessionState>,
-    parsed_file: Arc<Mutex<ParsedFile>>,
+    parsed_file: Arc<AtomicRefCell<ParsedFile>>,
 ) -> Result<()> {
-    let mut parsed_file_lock = lock_mutex(&parsed_file)?;
-    info!("Analyzing {}", parsed_file_lock.path);
-    if parsed_file_lock.contents.is_empty() {
-        parsed_file_lock.load_contents()?;
+    let mut pf_mr = parsed_file.borrow_mut();
+    info!("Analyzing {}", pf_mr.path);
+    if pf_mr.contents.is_empty() {
+        pf_mr.load_contents()?;
     }
     let scm = include_str!("../queries/defref.scm");
     let query = Query::new(tree_sitter_matlab::language(), scm)?;
@@ -36,10 +37,10 @@ pub fn analyze(
         .flat_map(|n| query.capture_index_for_name(n).map(|i| (i, n.clone())))
         .collect();
     let mut cursor = QueryCursor::new();
-    if let Some(tree) = &parsed_file_lock.tree {
+    if let Some(tree) = &pf_mr.tree {
         let node = tree.root_node();
         let mut captures: Vec<(String, Node)> = cursor
-            .captures(&query, node, parsed_file_lock.contents.as_bytes())
+            .captures(&query, node, pf_mr.contents.as_bytes())
             .map(|(c, _)| c)
             .flat_map(|c| c.captures)
             .flat_map(|c| -> Result<(String, Node)> {
@@ -52,26 +53,21 @@ pub fn analyze(
             })
             .collect();
         captures.sort_by(|(_, n1), (_, n2)| n1.start_byte().cmp(&n2.start_byte()));
-        let ws = analyze_impl(
-            state,
-            &captures,
-            &parsed_file_lock,
-            Arc::clone(&parsed_file),
-        )?;
-        parsed_file_lock.workspace = ws;
+        let ws = analyze_impl(state, &captures, &pf_mr, Arc::clone(&parsed_file))?;
+        pf_mr.workspace = ws;
     } else {
         return Err(anyhow!("File has no tree."));
     }
-    parsed_file_lock.dump_contents();
-    info!("Analysis finished: {}", parsed_file_lock.path.as_str());
+    pf_mr.dump_contents();
+    info!("Analysis finished: {}", pf_mr.path.as_str());
     Ok(())
 }
 
 fn analyze_impl(
     state: &MutexGuard<'_, &mut SessionState>,
     captures: &[(String, Node)],
-    parsed_file: &MutexGuard<'_, ParsedFile>,
-    parsed_file_arc: Arc<Mutex<ParsedFile>>,
+    parsed_file: &AtomicRefMut<'_, ParsedFile>,
+    parsed_file_arc: Arc<AtomicRefCell<ParsedFile>>,
 ) -> Result<Workspace> {
     let mut workspace = Workspace::default();
     let mut functions: HashMap<usize, (Node, Workspace)> = captures
@@ -95,10 +91,10 @@ fn analyze_impl(
             path: parsed_file.path.clone(),
             signature: signature.clone(),
         };
-        let mut definition = Arc::new(Mutex::new(definition));
+        let mut definition = Arc::new(AtomicRefCell::new(definition));
         // Does this signature already exist?
         for (f_name, function) in &state.workspace.functions {
-            let f_lock = lock_mutex(function)?;
+            let f_lock = function.borrow_mut();
             if *f_name == signature.name
                 && f_lock.signature.name_range == signature.name_range
                 && Arc::ptr_eq(&parsed_file_arc, &f_lock.parsed_file)
@@ -181,7 +177,7 @@ fn analyze_impl(
                 if !workspace
                     .references
                     .iter()
-                    .flat_map(|r| lock_mutex(r).map(|r| r.loc))
+                    .map(|r| r.borrow().loc)
                     .any(|loc| loc == node.range().into())
                 {
                     debug!("No references found at point.");
@@ -197,8 +193,7 @@ fn analyze_impl(
                         if let ReferenceTarget::Variable(v) = &vref.target {
                             if let Some(parent) = parent_of_kind("assignment", *node) {
                                 if let Some(left) = parent.child_by_field_name("left") {
-                                    let v_lock = lock_mutex(v)?;
-                                    if !Range::from(left.range()).fully_contains(v_lock.loc) {
+                                    if !Range::from(left.range()).fully_contains(v.borrow().loc) {
                                         vs.push(vref.clone());
                                     }
                                 } else {
@@ -210,7 +205,7 @@ fn analyze_impl(
                         }
                     }
                     if let Some(v) = vs.first() {
-                        let vref = Arc::new(Mutex::new(v.clone()));
+                        let vref = Arc::new(AtomicRefCell::new(v.clone()));
                         workspace.references.push(vref);
                     } else {
                         let vref = Reference {
@@ -218,7 +213,7 @@ fn analyze_impl(
                             name,
                             target: ReferenceTarget::UnknownVariable,
                         };
-                        let vref = Arc::new(Mutex::new(vref));
+                        let vref = Arc::new(AtomicRefCell::new(vref));
                         workspace.references.push(vref);
                     }
                 } else {
@@ -257,7 +252,7 @@ fn command_capture_impl(
     functions: &mut HashMap<usize, (Node, Workspace)>,
     state: &MutexGuard<'_, &mut SessionState>,
     node: &Node,
-    parsed_file: &MutexGuard<'_, ParsedFile>,
+    parsed_file: &AtomicRefMut<'_, ParsedFile>,
 ) -> Result<()> {
     debug!("Defining command [{name}].");
     match name.as_str() {
@@ -296,12 +291,12 @@ fn command_capture_impl(
                     name: name.clone(),
                     target: ReferenceTarget::Script(Arc::clone(ms)),
                 };
-                let r = Arc::new(Mutex::new(r));
+                let r = Arc::new(AtomicRefCell::new(r));
                 workspace.references.push(r);
             } else {
                 let fs = ref_to_fn(name, workspace, scopes, functions, state, *node, false)?;
                 if let Some(fref) = fs.first() {
-                    let fref = Arc::new(Mutex::new(fref.clone()));
+                    let fref = Arc::new(AtomicRefCell::new(fref.clone()));
                     workspace.references.push(fref);
                 }
             }
@@ -316,7 +311,7 @@ fn fncall_capture_impl(
     functions: &mut HashMap<usize, (Node, Workspace)>,
     state: &MutexGuard<'_, &mut SessionState>,
     node: &Node,
-    parsed_file: &MutexGuard<'_, ParsedFile>,
+    parsed_file: &AtomicRefMut<'_, ParsedFile>,
 ) -> Result<()> {
     if let Some(parent) = node.parent() {
         if parent.kind() == "field_expression" {
@@ -329,7 +324,7 @@ fn fncall_capture_impl(
             && !workspace
                 .references
                 .iter()
-                .flat_map(|f| lock_mutex(f).map(|f| f.loc))
+                .map(|f| f.borrow().loc)
                 .any(|loc| loc == name_node.range().into())
         {
             if let Ok(fname) = name_node
@@ -346,7 +341,7 @@ fn fncall_capture_impl(
                     parsed_file,
                 )?;
                 if let Some(v) = vs.first() {
-                    let v = Arc::new(Mutex::new(v.clone()));
+                    let v = Arc::new(AtomicRefCell::new(v.clone()));
                     workspace.references.push(v);
                     return Ok(());
                 }
@@ -360,7 +355,7 @@ fn fncall_capture_impl(
                     false,
                 )?;
                 if let Some(fref) = fs.first() {
-                    let fref = Arc::new(Mutex::new(fref.clone()));
+                    let fref = Arc::new(AtomicRefCell::new(fref.clone()));
                     workspace.references.push(fref);
                 } else {
                     let right_def = if let Some(parent) = parent_of_kind("assignment", *node) {
@@ -378,7 +373,7 @@ fn fncall_capture_impl(
                             name: fname.clone(),
                             target: ReferenceTarget::UnknownFunction,
                         };
-                        let fref = Arc::new(Mutex::new(r));
+                        let fref = Arc::new(AtomicRefCell::new(r));
                         workspace.references.push(fref);
                     }
                 }
@@ -392,7 +387,7 @@ fn import_capture_impl(
     workspace: &mut Workspace,
     state: &MutexGuard<'_, &mut SessionState>,
     node: &Node,
-    parsed_file: &MutexGuard<'_, ParsedFile>,
+    parsed_file: &AtomicRefMut<'_, ParsedFile>,
 ) -> Result<()> {
     if let Ok(path) = node.utf8_text(parsed_file.contents.as_bytes()) {
         debug!("Importing {path}");
@@ -423,7 +418,7 @@ fn field_capture_impl(
     functions: &mut HashMap<usize, (Node, Workspace)>,
     state: &MutexGuard<'_, &mut SessionState>,
     node: &Node,
-    parsed_file: &MutexGuard<'_, ParsedFile>,
+    parsed_file: &AtomicRefMut<'_, ParsedFile>,
 ) -> Result<()> {
     debug!("Defining field expression.");
     let is_def = if let Some(parent) = node.parent() {
@@ -468,7 +463,7 @@ fn field_capture_impl(
                             false,
                         )?;
                         if let Some(v) = vs.iter().chain(fs.iter()).next() {
-                            let r = Arc::new(Mutex::new(v.clone()));
+                            let r = Arc::new(AtomicRefCell::new(v.clone()));
                             workspace.references.push(r);
                         }
                         if is_def {
@@ -517,7 +512,7 @@ fn field_capture_impl(
         let fields: Vec<(String, Node)> =
             bo.iter().chain(fields.iter()).map(Clone::clone).collect();
         let mut is_pack = false;
-        let mut current_ns: Option<Arc<Mutex<Namespace>>> = None;
+        let mut current_ns: Option<Arc<AtomicRefCell<Namespace>>> = None;
         for (i, (name, field)) in fields.iter().enumerate() {
             let path = fields.iter().take(i + 1).map(|(n, _)| n).join(".");
             if is_def {
@@ -531,7 +526,7 @@ fn field_capture_impl(
                     parsed_file,
                 )?;
                 if let Some(v) = vref.first() {
-                    let r = Arc::new(Mutex::new(v.clone()));
+                    let r = Arc::new(AtomicRefCell::new(v.clone()));
                     workspace.references.push(r);
                     continue;
                 } else {
@@ -540,7 +535,7 @@ fn field_capture_impl(
                         name: path.clone(),
                         target: ReferenceTarget::UnknownVariable,
                     };
-                    let reference = Arc::new(Mutex::new(reference));
+                    let reference = Arc::new(AtomicRefCell::new(reference));
                     workspace.references.push(reference);
                 }
                 if i == 0 || i == fields.len().saturating_sub(1) {
@@ -566,7 +561,7 @@ fn field_capture_impl(
                     // folders are allowed here.
                     if let Some(ns) = current_ns.take() {
                         debug!("Is [{name}] a subpackage, function, or class?");
-                        let ns = lock_mutex(&ns)?;
+                        let ns = ns.borrow_mut();
                         let ws = ns.namespaces.get(name);
                         let cf = ns.classfolders.get(name);
                         if let Some(parent) = field.parent() {
@@ -580,7 +575,7 @@ fn field_capture_impl(
                                         name: path,
                                         target: ReferenceTarget::Function(Arc::clone(f_def)),
                                     };
-                                    let vref = Arc::new(Mutex::new(vref));
+                                    let vref = Arc::new(AtomicRefCell::new(vref));
                                     workspace.references.push(vref);
                                 } else if let Some(c_def) = state.workspace.classes.get(&path) {
                                     debug!("Got class for {path}.");
@@ -589,7 +584,7 @@ fn field_capture_impl(
                                         name: path,
                                         target: ReferenceTarget::Class(Arc::clone(c_def)),
                                     };
-                                    let vref = Arc::new(Mutex::new(vref));
+                                    let vref = Arc::new(AtomicRefCell::new(vref));
                                     workspace.references.push(vref);
                                 } else {
                                     debug!("Unknown function for path {path}");
@@ -598,7 +593,7 @@ fn field_capture_impl(
                                         name: path,
                                         target: ReferenceTarget::UnknownFunction,
                                     };
-                                    let vref = Arc::new(Mutex::new(vref));
+                                    let vref = Arc::new(AtomicRefCell::new(vref));
                                     workspace.references.push(vref);
                                     return Ok(());
                                 }
@@ -613,7 +608,7 @@ fn field_capture_impl(
                                         name: path,
                                         target: ReferenceTarget::Namespace(ws.clone()),
                                     };
-                                    let vref = Arc::new(Mutex::new(vref));
+                                    let vref = Arc::new(AtomicRefCell::new(vref));
                                     workspace.references.push(vref);
                                     current_ns = Some(Arc::clone(ws));
                                 } else if let Some(cf) = cf {
@@ -623,7 +618,7 @@ fn field_capture_impl(
                                         name: path,
                                         target: ReferenceTarget::ClassFolder(cf.clone()),
                                     };
-                                    let vref = Arc::new(Mutex::new(vref));
+                                    let vref = Arc::new(AtomicRefCell::new(vref));
                                     workspace.references.push(vref);
                                 } else {
                                     debug!("Something undefined.");
@@ -632,7 +627,7 @@ fn field_capture_impl(
                                         name: path,
                                         target: ReferenceTarget::UnknownVariable,
                                     };
-                                    let vref = Arc::new(Mutex::new(vref));
+                                    let vref = Arc::new(AtomicRefCell::new(vref));
                                     workspace.references.push(vref);
                                     return Ok(());
                                 }
@@ -647,7 +642,7 @@ fn field_capture_impl(
                             name: path,
                             target: ReferenceTarget::Namespace(ns.clone()),
                         };
-                        let vref = Arc::new(Mutex::new(vref));
+                        let vref = Arc::new(AtomicRefCell::new(vref));
                         workspace.references.push(vref);
                         current_ns = Some(Arc::clone(ns));
                     } else if state.workspace.classfolders.get(name).is_some() {
@@ -658,7 +653,7 @@ fn field_capture_impl(
                                 name: path.clone(),
                                 target: ReferenceTarget::Class(Arc::clone(class)),
                             };
-                            let cref = Arc::new(Mutex::new(cref));
+                            let cref = Arc::new(AtomicRefCell::new(cref));
                             workspace.references.push(cref);
                         }
                         return Ok(());
@@ -677,7 +672,7 @@ fn field_capture_impl(
                         parsed_file,
                     )?;
                     if let Some(v) = vs.first() {
-                        let v = Arc::new(Mutex::new(v.clone()));
+                        let v = Arc::new(AtomicRefCell::new(v.clone()));
                         workspace.references.push(v);
                     } else {
                         debug!("Could not find definition for {path}.");
@@ -686,7 +681,7 @@ fn field_capture_impl(
                             name: path.clone(),
                             target: ReferenceTarget::UnknownVariable,
                         };
-                        let vref = Arc::new(Mutex::new(vref));
+                        let vref = Arc::new(AtomicRefCell::new(vref));
                         workspace.references.push(vref);
                     }
                 }
@@ -702,7 +697,7 @@ fn ref_to_var(
     scopes: &[usize],
     functions: &mut HashMap<usize, (Node, Workspace)>,
     node: Node,
-    parsed_file: &MutexGuard<'_, ParsedFile>,
+    parsed_file: &AtomicRefMut<'_, ParsedFile>,
 ) -> Result<Vec<Reference>> {
     let mut references = vec![];
     let (is_assignment, p_range) = if let Some(parent) = parent_of_kind("assignment", node) {
@@ -716,7 +711,7 @@ fn ref_to_var(
     };
     for (_, ws) in scopes.iter().flat_map(|i| functions.get(i)) {
         for v in ws.variables.iter().rev() {
-            let v_lock = lock_mutex(v)?;
+            let v_lock = v.borrow();
             if v_lock.name == name {
                 if is_assignment && p_range.fully_contains(v_lock.loc) {
                     continue;
@@ -746,7 +741,7 @@ fn ref_to_var(
             .all(|(n, _)| n.kind() == "lambda")
     {
         for v in workspace.variables.iter().rev() {
-            let v_lock = lock_mutex(v)?;
+            let v_lock = v.borrow();
             if v_lock.name == name {
                 if is_assignment && p_range.fully_contains(v_lock.loc) {
                     continue;
@@ -776,7 +771,7 @@ fn ref_to_fn_in_ws<'a>(
 ) -> Result<Vec<Reference>> {
     let mut references = vec![];
     for fn_def in state.workspace.functions.values() {
-        let f_lock = lock_mutex(fn_def)?;
+        let f_lock = fn_def.borrow();
         if f_lock.name == name && (!f_lock.path.contains('.') || pkg) {
             let f_ref = Reference {
                 loc: node.range().into(),
@@ -787,7 +782,7 @@ fn ref_to_fn_in_ws<'a>(
         }
     }
     for cl_def in state.workspace.classes.values() {
-        let c_lock = lock_mutex(cl_def)?;
+        let c_lock = cl_def.borrow();
         if c_lock.name == name && (!c_lock.path.contains('.') || pkg) {
             let c_ref = Reference {
                 loc: node.range().into(),
@@ -812,8 +807,7 @@ fn ref_to_fn<'a>(
     let mut references = vec![];
     for (_, ws) in scopes.iter().flat_map(|i| functions.get(i)) {
         for f in ws.functions.values() {
-            let f_lock = lock_mutex(f)?;
-            if f_lock.name == name {
+            if f.borrow().name == name {
                 let r = Reference {
                     loc: node.range().into(),
                     name: name.clone(),
@@ -824,8 +818,7 @@ fn ref_to_fn<'a>(
         }
     }
     for f in workspace.functions.values() {
-        let f_lock = lock_mutex(f)?;
-        if f_lock.name == name {
+        if f.borrow().name == name {
             let r = Reference {
                 loc: node.range().into(),
                 name: name.clone(),
@@ -845,7 +838,7 @@ fn def_var(
     scopes: &[usize],
     functions: &mut HashMap<usize, (Node, Workspace)>,
     node: Node,
-    parsed_file: &MutexGuard<'_, ParsedFile>,
+    parsed_file: &AtomicRefMut<'_, ParsedFile>,
 ) -> Result<()> {
     debug!("Defining variable {name}");
     let mut cursor = node.walk();
@@ -871,14 +864,14 @@ fn def_var(
                 if let Some(scope) = scopes.first() {
                     if let Some((_, ws)) = functions.get(scope) {
                         for var in &ws.variables {
-                            let v_lock = lock_mutex(var)?;
+                            let v_lock = var.borrow();
                             if v_lock.name == name && v_lock.loc.contains(p) {
                                 let reference = Reference {
                                     loc: node.range().into(),
                                     name,
                                     target: ReferenceTarget::Variable(Arc::clone(var)),
                                 };
-                                let referece = Arc::new(Mutex::new(reference));
+                                let referece = Arc::new(AtomicRefCell::new(reference));
                                 workspace.references.push(referece);
                                 return Ok(());
                             }
@@ -900,7 +893,7 @@ fn def_var(
         return Ok(());
     }
     if soft_scope_parent(node).is_some() && !vref.is_empty() {
-        let vref = Arc::new(Mutex::new(vref.first().unwrap().clone()));
+        let vref = Arc::new(AtomicRefCell::new(vref.first().unwrap().clone()));
         workspace.references.push(vref);
     } else {
         let mut is_parameter = false;
@@ -917,7 +910,7 @@ fn def_var(
             name: name.clone(),
             is_parameter,
         };
-        let definition = Arc::new(Mutex::new(definition));
+        let definition = Arc::new(AtomicRefCell::new(definition));
         if let Some(scope) = scopes.first() {
             if let Some((_, ws)) = functions.get_mut(scope) {
                 ws.variables.push(definition);
@@ -1004,7 +997,7 @@ pub fn parent_of_kind<S: Into<String>>(kind: S, node: Node) -> Option<Node> {
     }
 }
 
-fn node_at_pos<'a>(parsed_file: &'a MutexGuard<'_, ParsedFile>, point: Point) -> Option<Node<'a>> {
+fn node_at_pos<'a>(parsed_file: &'a AtomicRefMut<'_, ParsedFile>, point: Point) -> Option<Node<'a>> {
     if let Some(tree) = &parsed_file.tree {
         tree.root_node()
             .named_descendant_for_point_range(point, point)

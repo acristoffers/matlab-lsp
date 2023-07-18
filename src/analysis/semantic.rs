@@ -5,17 +5,16 @@
  */
 
 use std::collections::HashMap;
-use std::sync::MutexGuard;
 
 use crate::code_loc;
 use crate::parsed_file::ParsedFile;
 use crate::types::{PosToPoint, Range, ReferenceTarget};
-use crate::utils::lock_mutex;
 use anyhow::{anyhow, Result};
+use atomic_refcell::AtomicRefMut;
 use lsp_types::{SemanticToken, SemanticTokenType};
 use tree_sitter::{Node, Query, QueryCursor};
 
-pub fn semantic_tokens(parsed_file: &MutexGuard<'_, ParsedFile>) -> Result<Vec<SemanticToken>> {
+pub fn semantic_tokens(parsed_file: &AtomicRefMut<'_, ParsedFile>) -> Result<Vec<SemanticToken>> {
     let scm = include_str!("../queries/semantic.scm");
     let query = Query::new(tree_sitter_matlab::language(), scm)?;
     let query_captures: HashMap<u32, String> = query
@@ -47,7 +46,7 @@ pub fn semantic_tokens(parsed_file: &MutexGuard<'_, ParsedFile>) -> Result<Vec<S
 
 fn semantic_tokens_impl(
     captures: &[(String, Node)],
-    parsed_file: &MutexGuard<'_, ParsedFile>,
+    parsed_file: &AtomicRefMut<'_, ParsedFile>,
 ) -> Result<Vec<SemanticToken>> {
     let mut tokens = vec![];
     for (capture, node) in captures {
@@ -123,15 +122,15 @@ fn semantic_tokens_impl(
 
 fn st_for_identifier(
     node: Node,
-    parsed_file: &MutexGuard<'_, ParsedFile>,
+    parsed_file: &AtomicRefMut<'_, ParsedFile>,
 ) -> Result<Option<SemanticToken>> {
     let range: Range = node.range().into();
     let range: lsp_types::Range = range.into();
     let mut ttype = None;
     for reference in &parsed_file.workspace.references {
-        let ref_lock = lock_mutex(reference)?;
-        if ref_lock.loc.contains(range.start.to_point()) {
-            ttype = match &ref_lock.target {
+        let r_ref = reference.borrow();
+        if r_ref.loc.contains(range.start.to_point()) {
+            ttype = match &r_ref.target {
                 ReferenceTarget::Class(_) => Some(SemanticTokenType::CLASS),
                 ReferenceTarget::ClassFolder(_) => Some(SemanticTokenType::CLASS),
                 ReferenceTarget::Function(_) => Some(SemanticTokenType::FUNCTION),
@@ -139,19 +138,16 @@ fn st_for_identifier(
                 ReferenceTarget::Script(_) => Some(SemanticTokenType::FUNCTION),
                 ReferenceTarget::UnknownFunction => Some(SemanticTokenType::FUNCTION),
                 ReferenceTarget::Variable(v) => {
-                    if ref_lock.name.contains('.') {
+                    if r_ref.name.contains('.') {
                         Some(SemanticTokenType::PROPERTY)
+                    } else if v.borrow().is_parameter {
+                        Some(SemanticTokenType::PARAMETER)
                     } else {
-                        let v_lock = lock_mutex(v)?;
-                        if v_lock.is_parameter {
-                            Some(SemanticTokenType::PARAMETER)
-                        } else {
-                            Some(SemanticTokenType::VARIABLE)
-                        }
+                        Some(SemanticTokenType::VARIABLE)
                     }
                 }
                 _ => {
-                    if ref_lock.name.contains('.') {
+                    if r_ref.name.contains('.') {
                         Some(SemanticTokenType::PROPERTY)
                     } else {
                         Some(SemanticTokenType::VARIABLE)
@@ -161,9 +157,9 @@ fn st_for_identifier(
         }
     }
     for variable in &parsed_file.workspace.variables {
-        let v_lock = lock_mutex(variable)?;
-        if v_lock.loc.contains(range.start.to_point()) {
-            ttype = if v_lock.name.contains('.') {
+        let v_ref = variable.borrow();
+        if v_ref.loc.contains(range.start.to_point()) {
+            ttype = if v_ref.name.contains('.') {
                 Some(SemanticTokenType::PROPERTY)
             } else {
                 Some(SemanticTokenType::VARIABLE)

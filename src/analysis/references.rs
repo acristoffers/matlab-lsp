@@ -4,9 +4,10 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, MutexGuard};
 
 use anyhow::{anyhow, Result};
+use atomic_refcell::{AtomicRefCell, AtomicRefMut};
 use log::debug;
 use lsp_types::{DocumentHighlightKind, Location, Url};
 use tree_sitter::Point;
@@ -15,7 +16,6 @@ use crate::code_loc;
 use crate::parsed_file::ParsedFile;
 use crate::session_state::{Namespace, SessionState};
 use crate::types::{ClassDefinition, FunctionDefinition, ReferenceTarget, VariableDefinition};
-use crate::utils::lock_mutex;
 
 pub fn find_references_to_symbol<'a>(
     state: &'a MutexGuard<'a, &mut SessionState>,
@@ -25,69 +25,63 @@ pub fn find_references_to_symbol<'a>(
 ) -> Result<Vec<(Location, DocumentHighlightKind)>> {
     debug!("Listing references.");
     let file = state.files.get(&path).ok_or(code_loc!("No such file."))?;
-    let file_lock = lock_mutex(file)?;
-    for r in &file_lock.workspace.references {
-        let r_lock = lock_mutex(r)?;
-        if r_lock.loc.contains(loc) {
-            let target = r_lock.target.clone();
+    let pf_mr = file.borrow_mut();
+    for r in &pf_mr.workspace.references {
+        let r_ref = r.borrow();
+        if r_ref.loc.contains(loc) {
+            let target = r_ref.target.clone();
             match &target {
                 ReferenceTarget::Class(c) => {
-                    drop(r_lock);
-                    drop(file_lock);
+                    drop(r_ref);
+                    drop(pf_mr);
                     return find_references_to_class(state, Arc::clone(c), inc_dec);
                 }
                 ReferenceTarget::Function(f) => {
-                    drop(r_lock);
-                    drop(file_lock);
+                    drop(r_ref);
+                    drop(pf_mr);
                     return find_references_to_function(state, Arc::clone(f), inc_dec);
                 }
                 ReferenceTarget::Script(f) => {
-                    drop(r_lock);
-                    drop(file_lock);
+                    drop(r_ref);
+                    drop(pf_mr);
                     return find_references_to_script(state, Arc::clone(f));
                 }
                 ReferenceTarget::Variable(v) => {
-                    drop(r_lock);
-                    return find_references_to_variable(&file_lock, Arc::clone(v), inc_dec);
+                    drop(r_ref);
+                    return find_references_to_variable(&pf_mr, Arc::clone(v), inc_dec);
                 }
                 ReferenceTarget::UnknownVariable => {
-                    let name = r_lock.name.clone();
-                    drop(r_lock);
+                    let name = r_ref.name.clone();
+                    drop(r_ref);
                     if name.contains('.') {
-                        return find_references_to_field(&file_lock, name, loc);
+                        return find_references_to_field(&pf_mr, name, loc);
                     }
                     return Ok(vec![]);
                 }
                 ReferenceTarget::Namespace(ns) => {
-                    drop(r_lock);
-                    return find_references_to_namespace(&file_lock, Arc::clone(ns));
+                    drop(r_ref);
+                    return find_references_to_namespace(&pf_mr, Arc::clone(ns));
                 }
                 _ => return Ok(vec![]),
             }
         }
     }
-    for v in &file_lock.workspace.variables {
-        let v_lock = lock_mutex(v)?;
-        if v_lock.loc.contains(loc) {
-            drop(v_lock);
-            return find_references_to_variable(&file_lock, Arc::clone(v), inc_dec);
+    for v in &pf_mr.workspace.variables {
+        if v.borrow().loc.contains(loc) {
+            return find_references_to_variable(&pf_mr, Arc::clone(v), inc_dec);
         }
     }
-    for f in file_lock.workspace.functions.values() {
-        let f_lock = lock_mutex(f)?;
-        if f_lock.loc.contains(loc) {
+    for f in pf_mr.workspace.functions.values() {
+        if f.borrow().loc.contains(loc) {
             let function = Arc::clone(f);
-            drop(f_lock);
-            drop(file_lock);
+            drop(pf_mr);
             return find_references_to_function(state, function, inc_dec);
         }
     }
-    for c in file_lock.workspace.classes.values() {
-        let c_lock = lock_mutex(c)?;
-        if c_lock.loc.contains(loc) {
+    for c in pf_mr.workspace.classes.values() {
+        if c.borrow().loc.contains(loc) {
             let class = Arc::clone(c);
-            drop(c_lock);
-            drop(file_lock);
+            drop(pf_mr);
             return find_references_to_class(state, class, inc_dec);
         }
     }
@@ -96,15 +90,19 @@ pub fn find_references_to_symbol<'a>(
 
 fn find_references_to_class<'a>(
     state: &'a MutexGuard<'a, &mut SessionState>,
-    class: Arc<Mutex<ClassDefinition>>,
+    class: Arc<AtomicRefCell<ClassDefinition>>,
     inc_dec: bool,
 ) -> Result<Vec<(Location, DocumentHighlightKind)>> {
     let mut refs = vec![];
     for (path, file) in &state.files {
-        let lock = lock_mutex(file)?;
-        let f_refs = lock.workspace.references.iter().map(|r| (path.clone(), r));
+        let pf_ref = file.borrow();
+        let f_refs = pf_ref
+            .workspace
+            .references
+            .iter()
+            .map(|r| (path.clone(), r));
         for (r_path, reference) in f_refs {
-            let r_lock = lock_mutex(reference)?;
+            let r_lock = reference.borrow();
             if let ReferenceTarget::Class(target) = &r_lock.target {
                 if Arc::ptr_eq(&class, target) {
                     let path = String::from("file://") + r_path.as_str();
@@ -116,12 +114,11 @@ fn find_references_to_class<'a>(
         }
     }
     if inc_dec {
-        let v_lock = lock_mutex(&class)?;
-        let v_file_lock = lock_mutex(&v_lock.parsed_file)?;
-        let path = v_file_lock.path.clone();
+        let class_ref = class.borrow();
+        let path = class_ref.parsed_file.borrow().path.clone();
         let path = String::from("file://") + path.as_str();
         let uri = Url::parse(path.as_str())?;
-        let loc = v_lock.loc;
+        let loc = class_ref.loc;
         let location = Location::new(uri.clone(), loc.into());
         refs.push((location, DocumentHighlightKind::TEXT));
     }
@@ -130,32 +127,35 @@ fn find_references_to_class<'a>(
 
 fn find_references_to_function<'a>(
     state: &'a MutexGuard<'a, &mut SessionState>,
-    function: Arc<Mutex<FunctionDefinition>>,
+    function: Arc<AtomicRefCell<FunctionDefinition>>,
     inc_dec: bool,
 ) -> Result<Vec<(Location, DocumentHighlightKind)>> {
     let mut refs = vec![];
     for (path, file) in &state.files {
-        let lock = lock_mutex(file)?;
-        let f_refs = lock.workspace.references.iter().map(|r| (path.clone(), r));
+        let pf_ref = file.borrow();
+        let f_refs = pf_ref
+            .workspace
+            .references
+            .iter()
+            .map(|r| (path.clone(), r));
         for (r_path, reference) in f_refs {
-            let r_lock = lock_mutex(reference)?;
-            if let ReferenceTarget::Function(target) = &r_lock.target {
+            let r_ref = reference.borrow();
+            if let ReferenceTarget::Function(target) = &r_ref.target {
                 if Arc::ptr_eq(&function, target) {
                     let path = String::from("file://") + r_path.as_str();
                     let uri = Url::parse(path.as_str())?;
-                    let location = Location::new(uri.clone(), r_lock.loc.into());
+                    let location = Location::new(uri.clone(), r_ref.loc.into());
                     refs.push((location, DocumentHighlightKind::TEXT));
                 }
             }
         }
     }
     if inc_dec {
-        let v_lock = lock_mutex(&function)?;
-        let v_file_lock = lock_mutex(&v_lock.parsed_file)?;
-        let path = v_file_lock.path.clone();
+        let v_ref = function.borrow();
+        let path = v_ref.parsed_file.borrow().path.clone();
         let path = String::from("file://") + path.as_str();
         let uri = Url::parse(path.as_str())?;
-        let loc = v_lock.loc;
+        let loc = v_ref.loc;
         let location = Location::new(uri.clone(), loc.into());
         refs.push((location, DocumentHighlightKind::TEXT));
     }
@@ -164,19 +164,23 @@ fn find_references_to_function<'a>(
 
 fn find_references_to_script<'a>(
     state: &'a MutexGuard<'a, &mut SessionState>,
-    script: Arc<Mutex<ParsedFile>>,
+    script: Arc<AtomicRefCell<ParsedFile>>,
 ) -> Result<Vec<(Location, DocumentHighlightKind)>> {
     let mut refs = vec![];
     for (path, file) in &state.files {
-        let lock = lock_mutex(file)?;
-        let f_refs = lock.workspace.references.iter().map(|r| (path.clone(), r));
+        let pf_ref = file.borrow();
+        let f_refs = pf_ref
+            .workspace
+            .references
+            .iter()
+            .map(|r| (path.clone(), r));
         for (r_path, reference) in f_refs {
-            let r_lock = lock_mutex(reference)?;
-            if let ReferenceTarget::Script(target) = &r_lock.target {
+            let r_ref = reference.borrow();
+            if let ReferenceTarget::Script(target) = &r_ref.target {
                 if Arc::ptr_eq(&script, target) {
                     let path = String::from("file://") + r_path.as_str();
                     let uri = Url::parse(path.as_str())?;
-                    let location = Location::new(uri.clone(), r_lock.loc.into());
+                    let location = Location::new(uri.clone(), r_ref.loc.into());
                     refs.push((location, DocumentHighlightKind::TEXT));
                 }
             }
@@ -186,25 +190,24 @@ fn find_references_to_script<'a>(
 }
 
 fn find_references_to_variable<'a>(
-    parsed_file: &'a MutexGuard<'a, ParsedFile>,
-    variable: Arc<Mutex<VariableDefinition>>,
+    parsed_file: &AtomicRefMut<'_, ParsedFile>,
+    variable: Arc<AtomicRefCell<VariableDefinition>>,
     inc_dec: bool,
 ) -> Result<Vec<(Location, DocumentHighlightKind)>> {
     let path = String::from("file://") + parsed_file.path.as_str();
     let uri = Url::parse(path.as_str())?;
     let mut refs = vec![];
     for r in &parsed_file.workspace.references {
-        let r_lock = lock_mutex(r)?;
-        if let ReferenceTarget::Variable(v) = &r_lock.target {
+        let r_ref = r.borrow();
+        if let ReferenceTarget::Variable(v) = &r_ref.target {
             if Arc::ptr_eq(&variable, v) {
-                let location = Location::new(uri.clone(), r_lock.loc.into());
+                let location = Location::new(uri.clone(), r_ref.loc.into());
                 refs.push((location, DocumentHighlightKind::READ));
             }
         }
     }
     if inc_dec {
-        let v_lock = lock_mutex(&variable)?;
-        let loc = v_lock.loc;
+        let loc = variable.borrow().loc;
         let location = Location::new(uri.clone(), loc.into());
         refs.push((location, DocumentHighlightKind::WRITE));
     }
@@ -212,17 +215,17 @@ fn find_references_to_variable<'a>(
 }
 
 fn find_references_to_namespace<'a>(
-    parsed_file: &'a MutexGuard<'a, ParsedFile>,
-    ns: Arc<Mutex<Namespace>>,
+    parsed_file: &AtomicRefMut<'_, ParsedFile>,
+    ns: Arc<AtomicRefCell<Namespace>>,
 ) -> Result<Vec<(Location, DocumentHighlightKind)>> {
     let path = String::from("file://") + parsed_file.path.as_str();
     let uri = Url::parse(path.as_str())?;
     let mut refs = vec![];
     for r in &parsed_file.workspace.references {
-        let r_lock = lock_mutex(r)?;
-        if let ReferenceTarget::Namespace(v) = &r_lock.target {
+        let r_ref = r.borrow();
+        if let ReferenceTarget::Namespace(v) = &r_ref.target {
             if Arc::ptr_eq(&ns, v) {
-                let location = Location::new(uri.clone(), r_lock.loc.into());
+                let location = Location::new(uri.clone(), r_ref.loc.into());
                 refs.push((location, DocumentHighlightKind::TEXT));
             }
         }
@@ -231,7 +234,7 @@ fn find_references_to_namespace<'a>(
 }
 
 fn find_references_to_field<'a>(
-    parsed_file: &'a MutexGuard<'a, ParsedFile>,
+    parsed_file: &AtomicRefMut<'_, ParsedFile>,
     name: String,
     pos: Point,
 ) -> Result<Vec<(Location, DocumentHighlightKind)>> {
@@ -240,11 +243,11 @@ fn find_references_to_field<'a>(
     let mut rs = vec![];
     if let Some(base_def) = base_definition(parsed_file, pos) {
         for r in &parsed_file.workspace.references {
-            let r_lock = lock_mutex(r)?;
-            if r_lock.name == name {
-                let range = r_lock.loc;
-                let pos = r_lock.loc.start;
-                drop(r_lock);
+            let r_ref = r.borrow();
+            if r_ref.name == name {
+                let range = r_ref.loc;
+                let pos = r_ref.loc.start;
+                drop(r_ref);
                 if let Some(def) = base_definition(parsed_file, pos) {
                     if Arc::ptr_eq(&base_def, &def) {
                         let location = Location::new(uri.clone(), range.into());
@@ -258,28 +261,25 @@ fn find_references_to_field<'a>(
 }
 
 fn base_definition(
-    parsed_file: &MutexGuard<'_, ParsedFile>,
+    parsed_file: &AtomicRefMut<'_, ParsedFile>,
     pos: Point,
-) -> Option<Arc<Mutex<VariableDefinition>>> {
+) -> Option<Arc<AtomicRefCell<VariableDefinition>>> {
     if let Some(tree) = &parsed_file.tree {
         let root = tree.root_node();
         if let Some(node) = root.descendant_for_point_range(pos, pos) {
             if let Some(parent) = node.parent() {
                 let pos = parent.start_position();
                 for r in &parsed_file.workspace.references {
-                    if let Ok(r_lock) = lock_mutex(r) {
-                        if r_lock.loc.contains(pos) {
-                            if let ReferenceTarget::Variable(v) = &r_lock.target {
-                                return Some(Arc::clone(v));
-                            }
+                    let r_ref = r.borrow();
+                    if r_ref.loc.contains(pos) {
+                        if let ReferenceTarget::Variable(v) = &r_ref.target {
+                            return Some(Arc::clone(v));
                         }
                     }
                 }
                 for d in &parsed_file.workspace.variables {
-                    if let Ok(d_lock) = lock_mutex(d) {
-                        if d_lock.loc.contains(pos) {
-                            return Some(Arc::clone(d));
-                        }
+                    if d.borrow().loc.contains(pos) {
+                        return Some(Arc::clone(d));
                     }
                 }
             }

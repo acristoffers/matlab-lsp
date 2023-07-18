@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1.0.71"
+atomic_refcell = "0.1.10"
 chardetng = "0.1.17"
 clap = { version = "4.1.13", features = ["derive", "env"] }
 crossbeam-channel = "0.5.6"

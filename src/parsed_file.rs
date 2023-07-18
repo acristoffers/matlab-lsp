@@ -5,7 +5,7 @@
  */
 
 use std::path::Path;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, MutexGuard};
 
 use crate::formatter::format;
 use crate::session_state::SessionState;
@@ -13,6 +13,7 @@ use crate::types::{ClassDefinition, FunctionDefinition, Workspace};
 pub use crate::types::{FileType, FunctionSignature, ParsedFile};
 use crate::utils::{function_signature, read_to_string};
 use anyhow::{anyhow, Context, Result};
+use atomic_refcell::{AtomicRefCell, AtomicRefMut};
 use log::{debug, error, info};
 use lsp_types::Url;
 
@@ -112,8 +113,8 @@ impl ParsedFile {
 
     pub fn define_type(
         state: &mut MutexGuard<'_, &mut SessionState>,
-        parsed_file: Arc<Mutex<ParsedFile>>,
-        parsed_file_lock: &mut MutexGuard<'_, ParsedFile>,
+        parsed_file: Arc<AtomicRefCell<ParsedFile>>,
+        parsed_file_lock: &mut AtomicRefMut<'_, ParsedFile>,
         namespace: String,
     ) -> Result<()> {
         debug!("Defining the type of a file.");
@@ -143,7 +144,7 @@ impl ParsedFile {
                                     name: class_name,
                                     path: qualified_name.clone(),
                                 };
-                                let class_def = Arc::new(Mutex::new(class_def));
+                                let class_def = Arc::new(AtomicRefCell::new(class_def));
                                 state
                                     .workspace
                                     .classes
@@ -169,7 +170,7 @@ impl ParsedFile {
                                 signature: fn_sig,
                                 path: qualified_name.clone(),
                             };
-                            let fn_def = Arc::new(Mutex::new(fn_def));
+                            let fn_def = Arc::new(AtomicRefCell::new(fn_def));
                             debug!("Inserting function {qualified_name} into state.");
                             state
                                 .workspace

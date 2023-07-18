@@ -5,10 +5,11 @@
  */
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, MutexGuard};
 use std::thread::{spawn, JoinHandle};
 
 use anyhow::{anyhow, Context, Result};
+use atomic_refcell::AtomicRefCell;
 use log::{debug, error, info};
 use lsp_server::{Message, RequestId};
 use lsp_types::request::{Request, SemanticTokensRefresh};
@@ -24,8 +25,8 @@ use crate::utils::{
 
 type FileTuple = (
     String,
-    Option<Arc<Mutex<Namespace>>>,
-    Option<Arc<Mutex<ClassFolder>>>,
+    Option<Arc<AtomicRefCell<Namespace>>>,
+    Option<Arc<AtomicRefCell<ClassFolder>>>,
 );
 
 impl SessionState {
@@ -72,13 +73,11 @@ impl SessionState {
             format!("0/{}", state.files.len()),
         )?;
         for (i, file) in state.files.clone().values().enumerate() {
-            let file_lock = lock_mutex(file)?;
-            if file_lock.open {
-                drop(file_lock);
+            if file.borrow().open {
                 let file2 = Arc::clone(file);
                 rescan_file(state, file2)?;
-                let mut file_lock = lock_mutex(file)?;
-                diagnostics::diagnotiscs(state, &mut file_lock)?;
+                let mut pf_mr = file.borrow_mut();
+                diagnostics::diagnotiscs(state, &mut pf_mr)?;
                 send_progress_report(
                     state,
                     0,
@@ -104,6 +103,7 @@ impl SessionState {
         } else {
             "".to_owned()
         };
+        info!("Root URI while rescanning: {project_path}");
         state
             .workspace
             .classes
@@ -128,12 +128,9 @@ impl SessionState {
         for _ in 0..2 {
             for (i, file) in state.files.clone().values().enumerate() {
                 let file = Arc::clone(file);
-                let lock = lock_mutex(&file)?;
-                if !lock.path.starts_with(&project_path) {
-                    drop(lock);
+                if !file.borrow().path.starts_with(&project_path) {
                     continue;
                 }
-                drop(lock);
                 rescan_file(state, file)?;
                 send_progress_report(
                     state,
@@ -202,8 +199,8 @@ impl SessionState {
     fn scan_folder(
         state: SessionStateArc,
         path: String,
-        ns: Option<Arc<Mutex<Namespace>>>,
-        cf: Option<Arc<Mutex<ClassFolder>>>,
+        ns: Option<Arc<AtomicRefCell<Namespace>>>,
+        cf: Option<Arc<AtomicRefCell<ClassFolder>>>,
     ) -> Result<Vec<FileTuple>> {
         let dir = std::fs::read_dir(path.clone()).context(code_loc!())?;
         let mut ns = ns;
@@ -240,7 +237,7 @@ impl SessionState {
                         .context(code_loc!())?
                         .to_string();
                     let path = if let Some(ns) = ns.as_mut() {
-                        lock_mutex(ns)?.path.clone() + "." + name.as_str()
+                        ns.borrow_mut().path.clone() + "." + name.as_str()
                     } else {
                         name.clone()
                     };
@@ -253,7 +250,7 @@ impl SessionState {
                         functions: HashMap::new(),
                         classes: HashMap::new(),
                     };
-                    let namespace = Arc::new(Mutex::new(namespace));
+                    let namespace = Arc::new(AtomicRefCell::new(namespace));
                     let fs = SessionState::scan_folder(
                         Arc::clone(&state),
                         folder_path.clone(),
@@ -263,7 +260,7 @@ impl SessionState {
                     .context(code_loc!())?;
                     files.extend(fs);
                     if let Some(ns) = ns.as_ref() {
-                        lock_mutex(ns)?
+                        ns.borrow_mut()
                             .namespaces
                             .insert(name.clone(), Arc::clone(&namespace));
                     }
@@ -280,7 +277,7 @@ impl SessionState {
                         .context(code_loc!())?
                         .to_string();
                     let path = if let Some(ns) = ns.as_mut() {
-                        lock_mutex(ns)?.path.clone() + "." + name.as_str()
+                        ns.borrow_mut().path.clone() + "." + name.as_str()
                     } else {
                         name.clone()
                     };
@@ -290,7 +287,7 @@ impl SessionState {
                         files: vec![],
                         methods: vec![],
                     };
-                    let class_folder = Arc::new(Mutex::new(class_folder));
+                    let class_folder = Arc::new(AtomicRefCell::new(class_folder));
                     let fs = SessionState::scan_folder(
                         Arc::clone(&state),
                         folder_path.clone(),
@@ -300,7 +297,7 @@ impl SessionState {
                     .context(code_loc!())?;
                     files.extend(fs);
                     if let Some(ns) = ns.as_mut() {
-                        lock_mutex(ns)?
+                        ns.borrow_mut()
                             .classfolders
                             .insert(path.clone(), Arc::clone(&class_folder));
                     }
@@ -318,8 +315,8 @@ impl SessionState {
     fn parse_file(
         state: &mut MutexGuard<'_, &mut SessionState>,
         path: String,
-        ns: Option<Arc<Mutex<Namespace>>>,
-        cf: Option<Arc<Mutex<ClassFolder>>>,
+        ns: Option<Arc<AtomicRefCell<Namespace>>>,
+        cf: Option<Arc<AtomicRefCell<ClassFolder>>>,
     ) -> Result<()> {
         let mut ns = ns;
         let cf = cf;
@@ -333,56 +330,51 @@ impl SessionState {
             "Parsed file contains {} bytes of code.",
             parsed_file.contents.len()
         );
-        let parsed_file = Arc::new(Mutex::new(parsed_file));
+        let parsed_file = Arc::new(AtomicRefCell::new(parsed_file));
         let ns_path = if let Some(ns_) = ns {
             ns = Some(Arc::clone(&ns_));
-            lock_mutex(&ns_)?.path.clone()
+            ns_.borrow_mut().path.clone()
         } else {
             "".into()
         };
-        let mut parsed_file_lock = lock_mutex(&parsed_file)?;
-        let path = parsed_file_lock.path.clone();
+        let mut pf_mr = parsed_file.borrow_mut();
+        let path = pf_mr.path.clone();
         if let Some(ns) = &ns {
-            let mut ns_lock = lock_mutex(ns)?;
-            ns_lock.files.push(Arc::clone(&parsed_file));
-            parsed_file_lock
+            let mut ns_mr = ns.borrow_mut();
+            ns_mr.files.push(Arc::clone(&parsed_file));
+            pf_mr
                 .workspace
                 .namespaces
-                .insert(ns_lock.path.clone(), Arc::clone(ns));
-            parsed_file_lock.in_namespace = Some(Arc::clone(ns));
+                .insert(ns_mr.path.clone(), Arc::clone(ns));
+            pf_mr.in_namespace = Some(Arc::clone(ns));
         } else if let Some(cf) = &cf {
-            let mut cf_lock = lock_mutex(cf)?;
-            cf_lock.files.push(Arc::clone(&parsed_file));
-            parsed_file_lock
+            let mut cf_mr = cf.borrow_mut();
+            cf_mr.files.push(Arc::clone(&parsed_file));
+            pf_mr
                 .workspace
                 .classfolders
-                .insert(cf_lock.path.clone(), Arc::clone(cf));
-            parsed_file_lock.in_classfolder = Some(Arc::clone(cf));
+                .insert(cf_mr.path.clone(), Arc::clone(cf));
+            pf_mr.in_classfolder = Some(Arc::clone(cf));
         }
         debug!("Inserting file {path} into state.");
-        ParsedFile::define_type(
-            state,
-            Arc::clone(&parsed_file),
-            &mut parsed_file_lock,
-            ns_path,
-        )?;
+        ParsedFile::define_type(state, Arc::clone(&parsed_file), &mut pf_mr, ns_path)?;
         state.files.insert(path, Arc::clone(&parsed_file));
-        match &parsed_file_lock.file_type {
+        match &pf_mr.file_type {
             FileType::Function(f) => {
                 state
                     .workspace
                     .functions
-                    .insert(lock_mutex(f)?.path.clone(), Arc::clone(f));
+                    .insert(f.borrow_mut().path.clone(), Arc::clone(f));
             }
             FileType::Class(f) => {
                 state
                     .workspace
                     .classes
-                    .insert(lock_mutex(f)?.path.clone(), Arc::clone(f));
+                    .insert(f.borrow_mut().path.clone(), Arc::clone(f));
             }
             _ => {}
         }
-        drop(parsed_file_lock);
+        drop(pf_mr);
         Ok(())
     }
 }

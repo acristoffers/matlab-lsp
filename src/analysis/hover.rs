@@ -4,9 +4,10 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, MutexGuard};
 
 use anyhow::Result;
+use atomic_refcell::{AtomicRefCell, AtomicRefMut};
 use itertools::Itertools;
 use log::debug;
 use lsp_types::{MarkupContent, MarkupKind};
@@ -15,7 +16,6 @@ use tree_sitter::Point;
 use crate::parsed_file::ParsedFile;
 use crate::session_state::SessionState;
 use crate::types::{FunctionDefinition, VariableDefinition};
-use crate::utils::lock_mutex;
 
 use super::defref::parent_of_kind;
 
@@ -25,32 +25,28 @@ pub fn hover_for_symbol(
     loc: Point,
 ) -> Result<Option<(MarkupContent, MarkupContent)>> {
     if let Some(file) = state.files.get(&file) {
-        let lock = lock_mutex(file)?;
-        for reference in &lock.workspace.references {
-            let r_lock = lock_mutex(reference)?;
+        let pf_ref = file.borrow_mut();
+        for reference in &pf_ref.workspace.references {
+            let r_lock = reference.borrow();
             if r_lock.loc.contains(loc) {
                 match &r_lock.target {
                     crate::types::ReferenceTarget::Class(cl) => {
-                        let lock = lock_mutex(cl)?;
-                        return hover_simple_info(format!("Class: {}", lock.name));
+                        return hover_simple_info(format!("Class: {}", cl.borrow().name));
                     }
                     crate::types::ReferenceTarget::ClassFolder(cf) => {
-                        let lock = lock_mutex(cf)?;
-                        return hover_simple_info(format!("Class Folder: {}", lock.name));
+                        return hover_simple_info(format!("Class Folder: {}", cf.borrow().name));
                     }
                     crate::types::ReferenceTarget::Function(function) => {
                         let function = Arc::clone(function);
                         drop(r_lock);
-                        drop(lock);
+                        drop(pf_ref);
                         return hover_function(function);
                     }
                     crate::types::ReferenceTarget::Namespace(ns) => {
-                        let lock = lock_mutex(ns)?;
-                        return hover_simple_info(format!("Namespace: {}", lock.name));
+                        return hover_simple_info(format!("Namespace: {}", ns.borrow().name));
                     }
                     crate::types::ReferenceTarget::Script(s) => {
-                        let lock = lock_mutex(s)?;
-                        return hover_simple_info(format!("Script: {}", lock.name));
+                        return hover_simple_info(format!("Script: {}", s.borrow().name));
                     }
                     crate::types::ReferenceTarget::UnknownVariable => {
                         return hover_simple_info("Unknown variable.".into())
@@ -59,7 +55,7 @@ pub fn hover_for_symbol(
                         return hover_simple_info("Unknown function".into())
                     }
                     crate::types::ReferenceTarget::Variable(v) => {
-                        return hover_variable(&lock, Arc::clone(v))
+                        return hover_variable(&pf_ref, Arc::clone(v))
                     }
                 }
             }
@@ -69,16 +65,16 @@ pub fn hover_for_symbol(
 }
 
 fn hover_variable(
-    parsed_file: &MutexGuard<'_, ParsedFile>,
-    variable: Arc<Mutex<VariableDefinition>>,
+    parsed_file: &AtomicRefMut<'_, ParsedFile>,
+    variable: Arc<AtomicRefCell<VariableDefinition>>,
 ) -> Result<Option<(MarkupContent, MarkupContent)>> {
     debug!("Hovering a variable.");
-    let lock = lock_mutex(&variable)?;
+    let vd_ref = variable.borrow();
     if let Some(tree) = &parsed_file.tree {
-        debug!("Checking for node at {}", lock.loc);
+        debug!("Checking for node at {}", vd_ref.loc);
         if let Some(node) = tree
             .root_node()
-            .named_descendant_for_point_range(lock.loc.start, lock.loc.end)
+            .named_descendant_for_point_range(vd_ref.loc.start, vd_ref.loc.end)
         {
             if let Some(parent) = parent_of_kind("assignment", node) {
                 let code = parent.utf8_text(parsed_file.contents.as_bytes())?;
@@ -116,11 +112,10 @@ fn hover_variable(
 }
 
 fn hover_function(
-    function: Arc<Mutex<FunctionDefinition>>,
+    function: Arc<AtomicRefCell<FunctionDefinition>>,
 ) -> Result<Option<(MarkupContent, MarkupContent)>> {
     debug!("Hovering a function.");
-    let lock = lock_mutex(&function)?;
-    let sig = &lock.signature;
+    let sig = &function.borrow().signature;
     let mut fsig = "function ".to_string();
     if !sig.argout_names.is_empty() {
         if sig.argout_names.len() == 1 {

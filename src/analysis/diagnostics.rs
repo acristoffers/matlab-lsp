@@ -10,6 +10,7 @@ use crate::parsed_file::ParsedFile;
 use crate::session_state::SessionState;
 use crate::types::Range;
 use anyhow::Result;
+use atomic_refcell::AtomicRefMut;
 use lsp_server::Message;
 use lsp_types::notification::{Notification, PublishDiagnostics};
 use lsp_types::{Diagnostic, DiagnosticSeverity, PublishDiagnosticsParams, Url};
@@ -17,7 +18,7 @@ use tree_sitter::{Query, QueryCursor};
 
 pub fn diagnotiscs(
     state: &mut MutexGuard<'_, &mut SessionState>,
-    parsed_file: &mut MutexGuard<'_, ParsedFile>,
+    parsed_file: &AtomicRefMut<'_, ParsedFile>,
 ) -> Result<()> {
     let mut diagnostics = vec![];
     if let Some(tree) = &parsed_file.tree {

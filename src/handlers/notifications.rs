@@ -6,7 +6,7 @@
 
 use std::path::Path;
 use std::process::ExitCode;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, MutexGuard};
 
 use crate::analysis::defref;
 use crate::parsed_file::{FileType, ParsedFile};
@@ -15,6 +15,7 @@ use crate::types::{Range, Workspace};
 use crate::utils::{lock_mutex, read_to_string, rescan_file, SessionStateArc};
 
 use anyhow::{anyhow, Result};
+use atomic_refcell::AtomicRefCell;
 use itertools::Itertools;
 use log::{debug, info};
 use lsp_server::{ExtractError, Message, Notification, RequestId};
@@ -102,10 +103,10 @@ fn handle_text_document_did_open(
     let contents = read_to_string(&mut params.text_document.text.as_bytes(), None)?.0;
     let path = params.text_document.uri.path().to_string();
     if let Some(file) = state.files.get(&path) {
-        let mut lock_file = lock_mutex(file)?;
-        lock_file.open = true;
-        lock_file.contents = contents;
-        drop(lock_file);
+        let mut pf_mr = file.borrow_mut();
+        pf_mr.open = true;
+        pf_mr.contents = contents;
+        drop(pf_mr);
         let file = Arc::clone(file);
         rescan_file(state, file)?;
         return Ok(None);
@@ -147,7 +148,7 @@ fn handle_text_document_did_open(
     };
     let key = parsed_file.path.clone();
     parsed_file.parse()?;
-    let parsed_file = Arc::new(Mutex::new(parsed_file));
+    let parsed_file = Arc::new(AtomicRefCell::new(parsed_file));
     let namespace = if let Some(segments) = params.text_document.uri.path_segments() {
         segments
             .map(|s| s.to_string())
@@ -157,7 +158,7 @@ fn handle_text_document_did_open(
         "".to_string()
     };
     defref::analyze(state, Arc::clone(&parsed_file))?;
-    let mut file_lock = lock_mutex(&parsed_file)?;
+    let mut file_lock = parsed_file.borrow_mut();
     state.files.insert(key.clone(), Arc::clone(&parsed_file));
     ParsedFile::define_type(state, Arc::clone(&parsed_file), &mut file_lock, namespace)?;
     debug!("Inserted {key} into the store");
@@ -181,9 +182,9 @@ fn handle_text_document_did_close(
     let path = params.text_document.uri.path();
     if params.text_document.uri.scheme() == "file" && std::path::Path::new(path).exists() {
         if let Some(file) = state.files.get(&path.to_string()) {
-            let mut lock_file = lock_mutex(file)?;
-            lock_file.open = false;
-            drop(lock_file);
+            let mut pf_mr = file.borrow_mut();
+            pf_mr.open = false;
+            drop(pf_mr);
             let file = Arc::clone(file);
             rescan_file(state, file)?;
             state.rescan_all_files = true;
@@ -217,22 +218,20 @@ fn handle_text_document_did_change(
         match change.range {
             Some(range) => {
                 let range: Range = range.into();
-                let mut parsed_file_lock = lock_mutex(&parsed_file)?;
-                let ts_range = range.find_bytes(&parsed_file_lock);
+                let mut pf_mr = parsed_file.borrow_mut();
+                let ts_range = range.find_bytes(&pf_mr);
                 let (start, mut end) = (ts_range.start_byte, ts_range.end_byte);
-                end = end.min(parsed_file_lock.contents.len().saturating_sub(1));
+                end = end.min(pf_mr.contents.len().saturating_sub(1));
                 if start >= end {
-                    parsed_file_lock
-                        .contents
-                        .insert_str(start, change.text.as_str());
+                    pf_mr.contents.insert_str(start, change.text.as_str());
                 } else {
                     debug!("Replacing from {start} to {end} with {}", change.text);
-                    parsed_file_lock
+                    pf_mr
                         .contents
                         .replace_range(start..end, change.text.as_str());
                 }
             }
-            None => lock_mutex(&parsed_file)?.contents = change.text,
+            None => parsed_file.borrow_mut().contents = change.text,
         }
     }
     rescan_file(state, parsed_file)?;
@@ -261,7 +260,7 @@ fn handle_text_document_did_save(
         .ok_or(anyhow!("No such file: {file_path}"))?
         .clone();
     if let Some(content) = params.text {
-        let mut parsed_file_lock = lock_mutex(&parsed_file)?;
+        let mut parsed_file_lock = parsed_file.borrow_mut();
         parsed_file_lock.contents = content;
         drop(parsed_file_lock);
         rescan_file(state, parsed_file)?;

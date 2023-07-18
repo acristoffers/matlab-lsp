@@ -123,7 +123,7 @@ fn handle_formatting(
         .files
         .get_mut(&params.text_document.uri.path().to_string())
         .with_context(|| "No file parsed")?;
-    let mut file = lock_mutex(file)?;
+    let mut file = file.borrow_mut();
     let pos = file
         .tree
         .as_ref()
@@ -165,7 +165,7 @@ fn handle_goto_definition(
         column: loc.character.try_into()?,
     };
     if let Some(file) = state.files.get(file) {
-        let file = lock_mutex(file)?;
+        let file = file.borrow_mut();
         debug!("Goto Definition for file {}", file.path);
         debug!(
             "File contains {} references",
@@ -174,12 +174,12 @@ fn handle_goto_definition(
         let refs = file.workspace.references.clone();
         drop(file);
         for refs in &refs {
-            let r = lock_mutex(refs)?;
+            let r = refs.borrow();
             if r.loc.contains(loc) {
                 debug!("Point in range, matching.");
                 let resp = match &r.target {
                     crate::types::ReferenceTarget::Class(cls) => {
-                        let path = lock_mutex(&lock_mutex(cls)?.parsed_file)?.path.clone();
+                        let path = cls.borrow().parsed_file.borrow().path.clone();
                         let path = String::from("file://") + path.as_str();
                         Some(GotoDefinitionResponse::from(Location::new(
                             Url::parse(path.as_str())?,
@@ -187,21 +187,21 @@ fn handle_goto_definition(
                         )))
                     }
                     crate::types::ReferenceTarget::Function(fun) => {
-                        let path = lock_mutex(&lock_mutex(fun)?.parsed_file)?.path.clone();
+                        let path = fun.borrow().parsed_file.borrow().path.clone();
                         let path = String::from("file://") + path.as_str();
                         Some(GotoDefinitionResponse::from(Location::new(
                             Url::parse(path.as_str())?,
-                            lock_mutex(fun)?.loc.into(),
+                            fun.borrow_mut().loc.into(),
                         )))
                     }
                     crate::types::ReferenceTarget::Variable(var) => {
                         Some(GotoDefinitionResponse::from(Location::new(
                             uri,
-                            lock_mutex(var)?.loc.into(),
+                            var.borrow_mut().loc.into(),
                         )))
                     }
                     crate::types::ReferenceTarget::Script(scr) => {
-                        let path = lock_mutex(scr)?.path.clone();
+                        let path = scr.borrow().path.clone();
                         let path = String::from("file://") + path.as_str();
                         Some(GotoDefinitionResponse::from(Location::new(
                             Url::parse(path.as_str())?,
@@ -382,15 +382,15 @@ fn handle_folding(
     info!("Received textDocument/foldingRange.");
     let path = params.text_document.uri.path().to_string();
     if let Some(file) = state.files.get(&path) {
-        let file_lock = lock_mutex(file)?;
-        if let Some(tree) = &file_lock.tree {
+        let pf_ref = file.borrow();
+        if let Some(tree) = &pf_ref.tree {
             let root = tree.root_node();
             let scm = "(block) @block";
             let query = Query::new(tree_sitter_matlab::language(), scm)?;
             let mut cursor = QueryCursor::new();
             let mut resp = vec![];
             for node in cursor
-                .captures(&query, root, file_lock.contents.as_bytes())
+                .captures(&query, root, pf_ref.contents.as_bytes())
                 .map(|(c, _)| c)
                 .flat_map(|c| c.captures)
                 .map(|c| c.node)
@@ -427,7 +427,7 @@ fn handle_semantic(
     info!("Received textDocument/semanticTokens/full.");
     let path = params.text_document.uri.path().to_string();
     if let Some(file) = state.files.get(&path) {
-        let parsed_file = lock_mutex(file)?;
+        let parsed_file = file.borrow_mut();
         let response = semantic_tokens(&parsed_file)?;
         let sts = SemanticTokens {
             result_id: None,

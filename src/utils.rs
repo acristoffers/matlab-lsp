@@ -13,6 +13,7 @@ use crate::session_state::SessionState;
 use crate::types::Range;
 
 use anyhow::{anyhow, Context, Result};
+use atomic_refcell::{AtomicRefCell, AtomicRefMut};
 use itertools::Itertools;
 use log::debug;
 use lsp_server::Message;
@@ -121,35 +122,34 @@ pub fn send_notification(
 
 pub fn rescan_file(
     state: &mut MutexGuard<'_, &mut SessionState>,
-    file: Arc<Mutex<ParsedFile>>,
+    file: Arc<AtomicRefCell<ParsedFile>>,
 ) -> Result<()> {
     debug!("Rescaning file.");
-    let mut file_lock = lock_mutex(&file)?;
-    if !file_lock.open {
-        file_lock.load_contents()?;
+    let mut pf_mr = file.borrow_mut();
+    if !pf_mr.open {
+        pf_mr.load_contents()?;
     }
-    remove_references_to_file(state, &mut file_lock, Arc::clone(&file))?;
-    file_lock.parse()?;
-    let ns_path = if let Some(ns) = &file_lock.in_namespace {
-        let ns_lock = lock_mutex(ns)?;
-        ns_lock.path.clone()
+    remove_references_to_file(state, &mut pf_mr, Arc::clone(&file))?;
+    pf_mr.parse()?;
+    let ns_path = if let Some(ns) = &pf_mr.in_namespace {
+        ns.borrow().path.clone()
     } else {
         "".into()
     };
-    ParsedFile::define_type(state, Arc::clone(&file), &mut file_lock, ns_path)?;
-    drop(file_lock);
+    ParsedFile::define_type(state, Arc::clone(&file), &mut pf_mr, ns_path)?;
+    drop(pf_mr);
     defref::analyze(state, Arc::clone(&file))?;
-    let mut file_lock = lock_mutex(&file)?;
-    if !file_lock.open {
-        file_lock.dump_contents();
+    let mut pf_mr = file.borrow_mut();
+    if !pf_mr.open {
+        pf_mr.dump_contents();
     }
     Ok(())
 }
 
 fn remove_references_to_file(
     state: &mut MutexGuard<'_, &mut SessionState>,
-    file: &mut MutexGuard<'_, ParsedFile>,
-    parsed_file: Arc<Mutex<ParsedFile>>,
+    file: &AtomicRefMut<'_, ParsedFile>,
+    parsed_file: Arc<AtomicRefCell<ParsedFile>>,
 ) -> Result<()> {
     'out: for v1 in file.workspace.functions.values() {
         for (name, v2) in &state.workspace.functions.clone() {
@@ -177,7 +177,7 @@ fn remove_references_to_file(
 }
 
 pub fn function_signature(
-    parsed_file: &MutexGuard<'_, ParsedFile>,
+    parsed_file: &AtomicRefMut<'_, ParsedFile>,
     node: Node,
 ) -> Result<FunctionSignature> {
     debug!("Scanning signature.");

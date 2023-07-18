@@ -6,9 +6,10 @@
 
 use std::collections::HashMap;
 use std::fmt::Display;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::Arc;
 
 use anyhow::{anyhow, Context};
+use atomic_refcell::{AtomicRefCell, AtomicRefMut};
 use crossbeam_channel::Sender;
 use lsp_server::Message;
 use lsp_types::{InitializeParams, Position};
@@ -38,7 +39,7 @@ pub struct SessionState {
 
     // Code states and structures
     /// A list of all files in the workspace+path, even the ones inside namespaces.
-    pub files: HashMap<String, Arc<Mutex<ParsedFile>>>,
+    pub files: HashMap<String, Arc<AtomicRefCell<ParsedFile>>>,
     // The path workspace.
     pub workspace: Workspace,
 
@@ -50,19 +51,19 @@ pub struct SessionState {
 pub struct Namespace {
     pub name: String,
     pub path: String,
-    pub files: Vec<Arc<Mutex<ParsedFile>>>,
-    pub namespaces: HashMap<String, Arc<Mutex<Namespace>>>,
-    pub classfolders: HashMap<String, Arc<Mutex<ClassFolder>>>,
-    pub functions: HashMap<String, Arc<Mutex<FunctionDefinition>>>,
-    pub classes: HashMap<String, Arc<Mutex<ClassDefinition>>>,
+    pub files: Vec<Arc<AtomicRefCell<ParsedFile>>>,
+    pub namespaces: HashMap<String, Arc<AtomicRefCell<Namespace>>>,
+    pub classfolders: HashMap<String, Arc<AtomicRefCell<ClassFolder>>>,
+    pub functions: HashMap<String, Arc<AtomicRefCell<FunctionDefinition>>>,
+    pub classes: HashMap<String, Arc<AtomicRefCell<ClassDefinition>>>,
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct ClassFolder {
     pub name: String,
     pub path: String,
-    pub files: Vec<Arc<Mutex<ParsedFile>>>,
-    pub methods: Vec<Arc<Mutex<FunctionDefinition>>>,
+    pub files: Vec<Arc<AtomicRefCell<ParsedFile>>>,
+    pub methods: Vec<Arc<AtomicRefCell<FunctionDefinition>>>,
 }
 
 // File related types
@@ -84,8 +85,8 @@ pub struct FunctionSignature {
 
 #[derive(Debug, Clone, Default)]
 pub enum FileType {
-    Function(Arc<Mutex<FunctionDefinition>>),
-    Class(Arc<Mutex<ClassDefinition>>),
+    Function(Arc<AtomicRefCell<FunctionDefinition>>),
+    Class(Arc<AtomicRefCell<ClassDefinition>>),
     #[default]
     MScript,
 }
@@ -101,9 +102,9 @@ pub struct ParsedFile {
     /// Is this a script, function or class?.
     pub file_type: FileType,
     /// Whether this file is inside a @folder.
-    pub in_classfolder: Option<Arc<Mutex<ClassFolder>>>,
+    pub in_classfolder: Option<Arc<AtomicRefCell<ClassFolder>>>,
     /// Whether this file is inside a +folder.
-    pub in_namespace: Option<Arc<Mutex<Namespace>>>,
+    pub in_namespace: Option<Arc<AtomicRefCell<Namespace>>>,
     /// Whether the file is currently open in the editor.
     pub open: bool,
     /// The file's parsed tree.
@@ -118,14 +119,14 @@ pub struct ParsedFile {
 pub struct FunctionDefinition {
     pub loc: Range,
     pub name: String,
-    pub parsed_file: Arc<Mutex<ParsedFile>>,
+    pub parsed_file: Arc<AtomicRefCell<ParsedFile>>,
     pub path: String,
     pub signature: FunctionSignature,
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct ClassDefinition {
-    pub parsed_file: Arc<Mutex<ParsedFile>>,
+    pub parsed_file: Arc<AtomicRefCell<ParsedFile>>,
     pub loc: Range,
     pub name: String,
     pub path: String,
@@ -140,15 +141,15 @@ pub struct VariableDefinition {
 
 #[derive(Debug, Clone, Default)]
 pub enum ReferenceTarget {
-    Class(Arc<Mutex<ClassDefinition>>),
-    ClassFolder(Arc<Mutex<ClassFolder>>),
-    Function(Arc<Mutex<FunctionDefinition>>),
-    Namespace(Arc<Mutex<Namespace>>),
-    Script(Arc<Mutex<ParsedFile>>),
+    Class(Arc<AtomicRefCell<ClassDefinition>>),
+    ClassFolder(Arc<AtomicRefCell<ClassFolder>>),
+    Function(Arc<AtomicRefCell<FunctionDefinition>>),
+    Namespace(Arc<AtomicRefCell<Namespace>>),
+    Script(Arc<AtomicRefCell<ParsedFile>>),
     #[default]
     UnknownVariable,
     UnknownFunction,
-    Variable(Arc<Mutex<VariableDefinition>>),
+    Variable(Arc<AtomicRefCell<VariableDefinition>>),
 }
 
 #[derive(Debug, Clone, Default)]
@@ -160,13 +161,13 @@ pub struct Reference {
 
 #[derive(Debug, Clone, Default)]
 pub struct Workspace {
-    pub classes: HashMap<String, Arc<Mutex<ClassDefinition>>>,
-    pub classfolders: HashMap<String, Arc<Mutex<ClassFolder>>>,
-    pub functions: HashMap<String, Arc<Mutex<FunctionDefinition>>>,
-    pub namespaces: HashMap<String, Arc<Mutex<Namespace>>>,
-    pub references: Vec<Arc<Mutex<Reference>>>,
-    pub scripts: HashMap<String, Arc<Mutex<ParsedFile>>>,
-    pub variables: Vec<Arc<Mutex<VariableDefinition>>>,
+    pub classes: HashMap<String, Arc<AtomicRefCell<ClassDefinition>>>,
+    pub classfolders: HashMap<String, Arc<AtomicRefCell<ClassFolder>>>,
+    pub functions: HashMap<String, Arc<AtomicRefCell<FunctionDefinition>>>,
+    pub namespaces: HashMap<String, Arc<AtomicRefCell<Namespace>>>,
+    pub references: Vec<Arc<AtomicRefCell<Reference>>>,
+    pub scripts: HashMap<String, Arc<AtomicRefCell<ParsedFile>>>,
+    pub variables: Vec<Arc<AtomicRefCell<VariableDefinition>>>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -235,7 +236,7 @@ impl Range {
                 && other.column <= self.end.column
     }
 
-    pub fn find_bytes(&self, parsed_file: &MutexGuard<'_, ParsedFile>) -> tree_sitter::Range {
+    pub fn find_bytes(&self, parsed_file: &AtomicRefMut<'_, ParsedFile>) -> tree_sitter::Range {
         let mut byte = 0;
         let mut row = 0;
         let mut col = 0;
