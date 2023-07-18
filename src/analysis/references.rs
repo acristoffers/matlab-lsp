@@ -17,6 +17,8 @@ use crate::parsed_file::ParsedFile;
 use crate::session_state::{Namespace, SessionState};
 use crate::types::{ClassDefinition, FunctionDefinition, ReferenceTarget, VariableDefinition};
 
+use super::defref::parent_of_kind;
+
 pub fn find_references_to_symbol<'a>(
     state: &'a MutexGuard<'a, &mut SessionState>,
     path: String,
@@ -267,7 +269,7 @@ fn base_definition(
     if let Some(tree) = &parsed_file.tree {
         let root = tree.root_node();
         if let Some(node) = root.descendant_for_point_range(pos, pos) {
-            if let Some(parent) = node.parent() {
+            if let Some(parent) = parent_of_kind("field_expression", node) {
                 let pos = parent.start_position();
                 for r in &parsed_file.workspace.references {
                     let r_ref = r.borrow();
