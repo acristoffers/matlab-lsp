@@ -129,7 +129,7 @@ pub fn rescan_file(
     if !pf_mr.open {
         pf_mr.load_contents()?;
     }
-    remove_references_to_file(state, &mut pf_mr, Arc::clone(&file))?;
+    remove_references_to_file(state, &pf_mr, Arc::clone(&file))?;
     pf_mr.parse()?;
     let ns_path = if let Some(ns) = &pf_mr.in_namespace {
         ns.borrow().path.clone()
