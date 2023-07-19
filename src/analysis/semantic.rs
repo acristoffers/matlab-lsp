@@ -53,13 +53,6 @@ fn semantic_tokens_impl(
         let range: Range = node.range().into();
         let range: lsp_types::Range = range.into();
         match capture.as_str() {
-            "macro" => tokens.push(SemanticToken {
-                delta_line: range.start.line,
-                delta_start: range.start.character,
-                length: range.end.character - range.start.character,
-                token_type: token_id(SemanticTokenType::MACRO),
-                token_modifiers_bitset: 0,
-            }),
             "number" => tokens.push(SemanticToken {
                 delta_line: range.start.line,
                 delta_start: range.start.character,
@@ -127,7 +120,13 @@ fn st_for_identifier(
     let range: Range = node.range().into();
     let range: lsp_types::Range = range.into();
     let mut ttype = None;
+    if node.utf8_text(parsed_file.contents.as_bytes())? == "end" {
+        ttype = Some(SemanticTokenType::KEYWORD);
+    }
     for reference in &parsed_file.workspace.references {
+        if ttype.is_some() {
+            break;
+        }
         let r_ref = reference.borrow();
         if r_ref.loc.contains(range.start.to_point()) {
             ttype = match &r_ref.target {
@@ -157,6 +156,9 @@ fn st_for_identifier(
         }
     }
     for variable in &parsed_file.workspace.variables {
+        if ttype.is_some() {
+            break;
+        }
         let v_ref = variable.borrow();
         if v_ref.loc.contains(range.start.to_point()) {
             ttype = if v_ref.name.contains('.') {

@@ -166,6 +166,20 @@ fn analyze_impl(
                         debug!("Node is part of something greater, leaving.");
                         continue;
                     }
+                    if parent.kind() == "function_call" {
+                        if let Some(parent) = parent.parent() {
+                            if parent.kind() == "field_expression" {
+                                // obj(1).bla = bla
+                                // ^^^ cannot be a reference to Undefined
+                                continue;
+                            }
+                        }
+                    }
+                    if node.utf8_text(parsed_file.contents.as_bytes())? == "end"
+                        && (parent.kind() == "arguments" || parent.kind() == "range")
+                    {
+                        continue;
+                    }
                     if parent.kind() == "assignment" {
                         if let Some(left) = parent.child_by_field_name("left") {
                             if left.id() == node.id() {
@@ -287,10 +301,23 @@ fn command_capture_impl(
             debug!("It's a clear.");
             if let Some(parent) = node.parent() {
                 let mut cursor = parent.walk();
-                for arg in parent
+                let args: Vec<Node> = parent
                     .named_children(&mut cursor)
                     .filter(|n| n.kind() == "command_argument")
-                {
+                    .collect();
+                if args.is_empty() {
+                    for (_, ws) in scopes.iter().flat_map(|s| functions.get(s)) {
+                        for var in &ws.variables {
+                            var.borrow_mut().cleared = true;
+                        }
+                    }
+                    if scopes.is_empty() {
+                        for var in &workspace.variables {
+                            var.borrow_mut().cleared = true;
+                        }
+                    }
+                }
+                for arg in args {
                     let text = arg.utf8_text(parsed_file.contents.as_bytes())?;
                     if text.starts_with('-') {
                         debug!("It's an option argument, we dont that here.");
@@ -622,7 +649,7 @@ fn field_capture_impl(
                     let r = Arc::new(AtomicRefCell::new(v.clone()));
                     workspace.references.push(r);
                     continue;
-                } else {
+                } else if i > 0 {
                     let reference = Reference {
                         loc: field.range().into(),
                         name: path.clone(),

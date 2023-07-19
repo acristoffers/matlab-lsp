@@ -49,6 +49,26 @@ pub fn diagnotiscs(
             }
         }
     }
+    for reference in &parsed_file.workspace.references {
+        let ref_ref = reference.borrow();
+        if ref_ref.name.contains('.') {
+            continue;
+        }
+        if let crate::types::ReferenceTarget::UnknownVariable = ref_ref.target {
+            let diagnotisc = Diagnostic {
+                range: ref_ref.loc.into(),
+                severity: Some(DiagnosticSeverity::WARNING),
+                code: None,
+                code_description: None,
+                source: Some("matlab-lsp".into()),
+                message: "This variable seems to be undefined".into(),
+                related_information: None,
+                tags: None,
+                data: None,
+            };
+            diagnostics.push(diagnotisc);
+        }
+    }
     let path = String::from("file://") + parsed_file.path.as_str();
     let uri = Url::parse(&path)?;
     let diagnostic_params = PublishDiagnosticsParams {

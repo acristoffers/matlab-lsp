@@ -1,4 +1,4 @@
-(command_name) @macro
+(command_name) @function
 (unary_operator (number)) @number
 (number) @number
 (comment) @comment
