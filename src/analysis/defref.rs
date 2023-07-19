@@ -180,12 +180,12 @@ fn analyze_impl(
                     {
                         continue;
                     }
-                    if parent.kind() == "assignment" {
-                        if let Some(left) = parent.child_by_field_name("left") {
-                            if left.id() == node.id() {
-                                debug!("Identifier in assignment left:, skipping.");
-                                continue;
-                            }
+                }
+                if let Some(parent) = parent_of_kind("assignment", *node) {
+                    if let Some(left) = parent.child_by_field_name("left") {
+                        if Range::from(left.range()).contains(node.start_position()) {
+                            debug!("Identifier in assignment left:, skipping.");
+                            continue;
                         }
                     }
                 }

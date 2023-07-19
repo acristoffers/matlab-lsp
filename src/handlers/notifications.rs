@@ -8,7 +8,7 @@ use std::path::Path;
 use std::process::ExitCode;
 use std::sync::{Arc, MutexGuard};
 
-use crate::analysis::defref;
+use crate::analysis::{defref, diagnostics};
 use crate::parsed_file::{FileType, ParsedFile};
 use crate::session_state::SessionState;
 use crate::types::{Range, Workspace};
@@ -159,6 +159,7 @@ fn handle_text_document_did_open(
     };
     defref::analyze(state, Arc::clone(&parsed_file))?;
     let mut pf_mr = parsed_file.borrow_mut();
+    diagnostics::diagnotiscs(state, &pf_mr)?;
     state.files.insert(key.clone(), Arc::clone(&parsed_file));
     ParsedFile::define_type(state, Arc::clone(&parsed_file), &mut pf_mr, namespace)?;
     debug!("Inserted {key} into the store");
@@ -167,6 +168,7 @@ fn handle_text_document_did_open(
         method: SemanticTokensRefresh::METHOD.to_string(),
         params: serde_json::to_value(())?,
     }))?;
+    state.rescan_open_files = true;
     state.request_id += 1;
     Ok(None)
 }
