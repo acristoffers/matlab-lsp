@@ -18,6 +18,7 @@ use anyhow::{anyhow, Result};
 use atomic_refcell::{AtomicRefCell, AtomicRefMut};
 use itertools::Itertools;
 use log::{debug, error, info};
+use regex::Regex;
 use tree_sitter::{Node, Point, Query, QueryCursor};
 
 pub fn analyze(
@@ -279,6 +280,39 @@ fn command_capture_impl(
                     .filter(|n| n.kind() == "command_argument")
                 {
                     import_capture_impl(workspace, state, &arg, parsed_file)?;
+                }
+            }
+        }
+        "syms" => {
+            debug!("It's a syms.");
+            if let Some(parent) = node.parent() {
+                let mut cursor = parent.walk();
+                let children: Vec<Node> = parent
+                    .named_children(&mut cursor)
+                    .filter(|n| n.kind() == "command_argument")
+                    .collect();
+                let regex = Regex::new(r"^[a-zA-Z_][a-zA-Z_0-9]*$")?;
+                for (i, arg) in children.iter().enumerate() {
+                    let text = arg.utf8_text(parsed_file.contents.as_bytes())?;
+                    if i == children.len() - 1
+                        && (text == "matrix"
+                            || text == "clear"
+                            || text == "real"
+                            || text == "positive")
+                    {
+                        break;
+                    } else if regex.is_match(text) {
+                        def_var(
+                            text.to_owned(),
+                            workspace,
+                            scopes,
+                            functions,
+                            *arg,
+                            parsed_file,
+                        )?;
+                    } else {
+                        break;
+                    }
                 }
             }
         }
@@ -997,7 +1031,10 @@ pub fn parent_of_kind<S: Into<String>>(kind: S, node: Node) -> Option<Node> {
     }
 }
 
-fn node_at_pos<'a>(parsed_file: &'a AtomicRefMut<'_, ParsedFile>, point: Point) -> Option<Node<'a>> {
+fn node_at_pos<'a>(
+    parsed_file: &'a AtomicRefMut<'_, ParsedFile>,
+    point: Point,
+) -> Option<Node<'a>> {
     if let Some(tree) = &parsed_file.tree {
         tree.root_node()
             .named_descendant_for_point_range(point, point)
