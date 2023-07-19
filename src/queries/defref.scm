@@ -7,6 +7,7 @@
 (function_arguments (identifier) @vardef)
 (function_output (identifier) @vardef)
 (global_operator (identifier) @vardef)
+(persistent_operator (identifier) @vardef)
 (iterator . (identifier) @vardef)
 (lambda (arguments (identifier) @vardef))
 (multioutput_variable (function_call (identifier) @vardef))
