@@ -136,6 +136,7 @@ pub struct ClassDefinition {
 pub struct VariableDefinition {
     pub loc: Range,
     pub name: String,
+    pub cleared: bool,
     pub is_parameter: bool,
 }
 

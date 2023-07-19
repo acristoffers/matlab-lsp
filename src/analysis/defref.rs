@@ -283,6 +283,65 @@ fn command_capture_impl(
                 }
             }
         }
+        "clear" => {
+            debug!("It's a clear.");
+            if let Some(parent) = node.parent() {
+                let mut cursor = parent.walk();
+                for arg in parent
+                    .named_children(&mut cursor)
+                    .filter(|n| n.kind() == "command_argument")
+                {
+                    let text = arg.utf8_text(parsed_file.contents.as_bytes())?;
+                    if text.starts_with('-') {
+                        debug!("It's an option argument, we dont that here.");
+                        break;
+                    } else if text.contains('*') {
+                        debug!("It's a glob argument.");
+                        let text = text.replace('*', ".*");
+                        let text = format!("^{}$", text);
+                        if let Ok(sw) = Regex::new(text.as_str()) {
+                            for (_, ws) in scopes.iter().flat_map(|s| functions.get(s)) {
+                                for var in &ws.variables {
+                                    let mut var_mr = var.borrow_mut();
+                                    if sw.is_match(var_mr.name.as_str()) {
+                                        var_mr.cleared = true;
+                                    }
+                                }
+                            }
+                            if scopes.is_empty() {
+                                for var in &workspace.variables {
+                                    let mut var_mr = var.borrow_mut();
+                                    if sw.is_match(var_mr.name.as_str()) {
+                                        var_mr.cleared = true;
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        debug!("It's a variable name");
+                        for (_, ws) in scopes.iter().flat_map(|s| functions.get(s)) {
+                            for var in &ws.variables {
+                                let mut var_mr = var.borrow_mut();
+                                if var_mr.name == text {
+                                    var_mr.cleared = true;
+                                }
+                            }
+                        }
+                        if scopes.is_empty() {
+                            debug!("Clearing in workspace.");
+                            for var in &workspace.variables {
+                                let mut var_mr = var.borrow_mut();
+                                debug!("Checking variable {}", var_mr.name);
+                                if var_mr.name == text {
+                                    debug!("Clearing {text}");
+                                    var_mr.cleared = true;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
         "syms" => {
             debug!("It's a syms.");
             if let Some(parent) = node.parent() {
@@ -746,6 +805,9 @@ fn ref_to_var(
     for (_, ws) in scopes.iter().flat_map(|i| functions.get(i)) {
         for v in ws.variables.iter().rev() {
             let v_ref = v.borrow();
+            if v_ref.cleared {
+                continue;
+            }
             if v_ref.name == name {
                 if is_assignment && p_range.fully_contains(v_ref.loc) {
                     continue;
@@ -776,6 +838,9 @@ fn ref_to_var(
     {
         for v in workspace.variables.iter().rev() {
             let v_ref = v.borrow();
+            if v_ref.cleared {
+                continue;
+            }
             if v_ref.name == name {
                 if is_assignment && p_range.fully_contains(v_ref.loc) {
                     continue;
@@ -942,6 +1007,7 @@ fn def_var(
         let definition = VariableDefinition {
             loc: node.range().into(),
             name: name.clone(),
+            cleared: false,
             is_parameter,
         };
         let definition = Arc::new(AtomicRefCell::new(definition));
