@@ -8,7 +8,6 @@ use std::sync::MutexGuard;
 
 use atomic_refcell::AtomicRefMut;
 use itertools::Itertools;
-use log::debug;
 use lsp_types::{
     CompletionItem, CompletionItemKind, InsertTextFormat, MarkupContent, MarkupKind, Position,
 };
@@ -28,12 +27,12 @@ pub fn complete(
     let mut result = vec![];
     let point = pos.to_point();
     let identifier = identifier(pf_mr, point);
-    debug!("Looking for identifier: {identifier}");
     result.extend(variable_completions(pf_mr, &identifier, point));
     result.extend(function_completions(state, pf_mr, &identifier));
     result.extend(namespace_completions(state, &identifier));
     result.extend(classfolder_completions(state, &identifier));
     result.extend(class_completions(state, &identifier));
+    result.extend(script_completions(state, &identifier));
     result.extend(reference_completions(pf_mr, &identifier, point));
     result.sort_by(|a, b| a.label.cmp(&b.label));
     result.dedup_by(|a, b| a.label == b.label);
@@ -62,7 +61,6 @@ fn variable_completions(
     point: Point,
 ) -> Vec<CompletionItem> {
     let mut completions = vec![];
-    debug!("Point: {point}");
     for var in &pf_mr.workspace.variables {
         let var_ref = var.borrow();
         if var_ref.loc.start.row >= point.row || var_ref.cleared > 0 && var_ref.cleared < point.row
@@ -111,7 +109,6 @@ fn reference_completions(
     point: Point,
 ) -> Vec<CompletionItem> {
     let mut completions = vec![];
-    debug!("Point: {point}");
     for var in &pf_mr.workspace.references {
         let var = var.borrow();
         if let ReferenceTarget::Variable(def) = &var.target {
@@ -121,9 +118,6 @@ fn reference_completions(
             }
         }
         if var.name.starts_with(text) {
-            if let ReferenceTarget::Variable(def) = &var.target {
-                debug!("Match: {point}, {:?}", def.borrow());
-            }
             let completion = CompletionItem {
                 label: var.name.clone(),
                 label_details: None,
@@ -197,7 +191,6 @@ fn function_completions(
         .chain(pf_mr.workspace.functions.iter());
     for (name, function) in functions {
         if name.starts_with(text) {
-            debug!("[FS]: {name} matched with {text} and is being returned.");
             let sig = &function.borrow().signature;
             let mut fsig = "function ".to_string();
             if !sig.argout_names.is_empty() {
@@ -247,11 +240,31 @@ fn class_completions(state: &MutexGuard<'_, &mut SessionState>, text: &str) -> V
     let mut completions = vec![];
     for name in state.workspace.classes.keys() {
         if name.starts_with(text) {
-            debug!("[FS]: {name} matched with {text} and is being returned.");
             let completion = CompletionItem {
                 label: name.clone(),
                 label_details: None,
                 kind: Some(CompletionItemKind::CLASS),
+                deprecated: Some(false),
+                preselect: Some(false),
+                ..CompletionItem::default()
+            };
+            completions.push(completion);
+        }
+    }
+    completions
+}
+
+fn script_completions(
+    state: &MutexGuard<'_, &mut SessionState>,
+    text: &str,
+) -> Vec<CompletionItem> {
+    let mut completions = vec![];
+    for name in state.workspace.scripts.keys() {
+        if name.starts_with(text) {
+            let completion = CompletionItem {
+                label: name.clone(),
+                label_details: None,
+                kind: Some(CompletionItemKind::FILE),
                 deprecated: Some(false),
                 preselect: Some(false),
                 ..CompletionItem::default()
