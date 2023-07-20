@@ -20,12 +20,13 @@ use itertools::Itertools;
 use log::{debug, info};
 use lsp_server::{ExtractError, Message, Notification, RequestId};
 use lsp_types::notification::{
-    DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument, DidSaveTextDocument, Exit,
+    Cancel, DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument, DidSaveTextDocument,
+    Exit,
 };
 use lsp_types::request::{Request, SemanticTokensRefresh};
 use lsp_types::{
-    DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
-    DidSaveTextDocumentParams,
+    CancelParams, DidChangeTextDocumentParams, DidCloseTextDocumentParams,
+    DidOpenTextDocumentParams, DidSaveTextDocumentParams,
 };
 
 pub fn handle_notification(
@@ -39,6 +40,7 @@ pub fn handle_notification(
         .handle::<DidCloseTextDocument>(&mut lock, handle_text_document_did_close)
         .handle::<DidChangeTextDocument>(&mut lock, handle_text_document_did_change)
         .handle::<DidSaveTextDocument>(&mut lock, handle_text_document_did_save)
+        .handle::<Cancel>(&mut lock, handle_cancel)
         .handle::<Exit>(&mut lock, handle_exit)
         .finish()
 }
@@ -274,6 +276,14 @@ fn handle_text_document_did_save(
     }))?;
     state.request_id += 1;
     state.rescan_all_files = true;
+    Ok(None)
+}
+
+fn handle_cancel(
+    _: &mut MutexGuard<'_, &mut SessionState>,
+    _: CancelParams,
+) -> Result<Option<ExitCode>> {
+    // Cancelation is not supported, this is here to silence the logger.
     Ok(None)
 }
 
