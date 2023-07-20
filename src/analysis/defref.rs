@@ -270,7 +270,7 @@ fn command_capture_impl(
     parsed_file: &AtomicRefMut<'_, ParsedFile>,
 ) -> Result<()> {
     debug!("Defining command [{name}].");
-    match name.as_str() {
+    match name.to_lowercase().as_str() {
         "load" => {
             debug!("It's a load.");
             if let Some(parent) = node.parent() {
@@ -297,7 +297,7 @@ fn command_capture_impl(
                 }
             }
         }
-        "clear" => {
+        "clear" | "clearvars" => {
             debug!("It's a clear.");
             if let Some(parent) = node.parent() {
                 let mut cursor = parent.walk();
@@ -317,50 +317,53 @@ fn command_capture_impl(
                         }
                     }
                 }
+                let mut delete = vec![];
+                let mut keep = vec![];
+                let mut except = false;
                 for arg in args {
                     let text = arg.utf8_text(parsed_file.contents.as_bytes())?;
+                    if text.to_lowercase() == "-except" && name.to_lowercase() == "clearvars" {
+                        except = true;
+                        continue;
+                    }
                     if text.starts_with('-') {
                         debug!("It's an option argument, we dont that here.");
                         break;
-                    } else if text.contains('*') {
-                        debug!("It's a glob argument.");
-                        let text = text.replace('*', ".*");
-                        let text = format!("^{}$", text);
-                        if let Ok(sw) = Regex::new(text.as_str()) {
-                            for (_, ws) in scopes.iter().flat_map(|s| functions.get(s)) {
-                                for var in &ws.variables {
-                                    let mut var_mr = var.borrow_mut();
-                                    if sw.is_match(var_mr.name.as_str()) {
-                                        var_mr.cleared = true;
-                                    }
-                                }
-                            }
-                            if scopes.is_empty() {
-                                for var in &workspace.variables {
-                                    let mut var_mr = var.borrow_mut();
-                                    if sw.is_match(var_mr.name.as_str()) {
-                                        var_mr.cleared = true;
-                                    }
-                                }
-                            }
-                        }
+                    }
+                    if !except {
+                        delete.push(text);
                     } else {
-                        debug!("It's a variable name");
-                        for (_, ws) in scopes.iter().flat_map(|s| functions.get(s)) {
-                            for var in &ws.variables {
-                                let mut var_mr = var.borrow_mut();
-                                if var_mr.name == text {
-                                    var_mr.cleared = true;
-                                }
-                            }
-                        }
-                        if scopes.is_empty() {
-                            debug!("Clearing in workspace.");
-                            for var in &workspace.variables {
-                                let mut var_mr = var.borrow_mut();
-                                debug!("Checking variable {}", var_mr.name);
-                                if var_mr.name == text {
-                                    debug!("Clearing {text}");
+                        keep.push(text);
+                    }
+                }
+                if delete.is_empty() {
+                    delete.push("*");
+                }
+                let mut ws: Vec<&Workspace> = scopes
+                    .iter()
+                    .flat_map(|s| functions.get(s))
+                    .map(|(_, ws)| ws)
+                    .collect();
+                if ws.is_empty() {
+                    ws.push(workspace);
+                }
+                for ws in ws {
+                    'var: for var in &ws.variables {
+                        let mut var_mr = var.borrow_mut();
+                        for text in &delete {
+                            let text = text.replace('*', ".*");
+                            let text = format!("^{}$", text);
+                            if let Ok(sw) = Regex::new(text.as_str()) {
+                                if sw.is_match(var_mr.name.as_str()) {
+                                    for text in &keep {
+                                        let text = text.replace('*', ".*");
+                                        let text = format!("^{}$", text);
+                                        if let Ok(sw) = Regex::new(text.as_str()) {
+                                            if sw.is_match(var_mr.name.as_str()) {
+                                                continue 'var;
+                                            }
+                                        }
+                                    }
                                     var_mr.cleared = true;
                                 }
                             }
