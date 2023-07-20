@@ -138,6 +138,7 @@ pub struct VariableDefinition {
     pub name: String,
     pub cleared: usize,
     pub is_parameter: bool,
+    pub is_global: bool,
 }
 
 #[derive(Debug, Clone, Default)]

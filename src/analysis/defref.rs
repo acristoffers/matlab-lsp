@@ -309,7 +309,7 @@ fn command_capture_impl(
                     for (_, ws) in scopes.iter().flat_map(|s| functions.get(s)) {
                         for var in &ws.variables {
                             let mut var_mr = var.borrow_mut();
-                            if var_mr.cleared == 0 {
+                            if var_mr.cleared == 0 && !var_mr.is_global {
                                 var_mr.cleared = node.range().start_point.row;
                             }
                         }
@@ -317,7 +317,7 @@ fn command_capture_impl(
                     if scopes.is_empty() {
                         for var in &workspace.variables {
                             let mut var_mr = var.borrow_mut();
-                            if var_mr.cleared == 0 {
+                            if var_mr.cleared == 0 && !var_mr.is_global {
                                 var_mr.cleared = node.range().start_point.row;
                             }
                         }
@@ -326,8 +326,13 @@ fn command_capture_impl(
                 let mut delete = vec![];
                 let mut keep = vec![];
                 let mut except = false;
+                let mut globals = false;
                 for arg in args {
                     let text = arg.utf8_text(parsed_file.contents.as_bytes())?;
+                    if text.to_lowercase() == "global" {
+                        globals = true;
+                        continue;
+                    }
                     if text.to_lowercase() == "-except" && name.to_lowercase() == "clearvars" {
                         except = true;
                         continue;
@@ -370,7 +375,7 @@ fn command_capture_impl(
                                             }
                                         }
                                     }
-                                    if var_mr.cleared == 0 {
+                                    if var_mr.cleared == 0 && (!var_mr.is_global || globals) {
                                         var_mr.cleared = node.range().start_point.row;
                                     }
                                 }
@@ -1039,12 +1044,15 @@ fn def_var(
         workspace.references.push(vref);
     } else {
         let mut is_parameter = false;
+        let mut is_global = false;
         if let Some(parent) = node.parent() {
             if parent.kind() == "function_output"
                 || parent.kind() == "function_arguments"
                 || parent.kind() == "multioutput_variable"
             {
                 is_parameter = true;
+            } else if parent.kind() == "global_operator" {
+                is_global = true;
             }
         }
         let definition = VariableDefinition {
@@ -1052,6 +1060,7 @@ fn def_var(
             name: name.clone(),
             cleared: 0,
             is_parameter,
+            is_global,
         };
         let definition = Arc::new(AtomicRefCell::new(definition));
         if let Some(scope) = scopes.first() {
