@@ -308,12 +308,18 @@ fn command_capture_impl(
                 if args.is_empty() {
                     for (_, ws) in scopes.iter().flat_map(|s| functions.get(s)) {
                         for var in &ws.variables {
-                            var.borrow_mut().cleared = true;
+                            let mut var_mr = var.borrow_mut();
+                            if var_mr.cleared == 0 {
+                                var_mr.cleared = node.range().start_point.row;
+                            }
                         }
                     }
                     if scopes.is_empty() {
                         for var in &workspace.variables {
-                            var.borrow_mut().cleared = true;
+                            let mut var_mr = var.borrow_mut();
+                            if var_mr.cleared == 0 {
+                                var_mr.cleared = node.range().start_point.row;
+                            }
                         }
                     }
                 }
@@ -364,7 +370,9 @@ fn command_capture_impl(
                                             }
                                         }
                                     }
-                                    var_mr.cleared = true;
+                                    if var_mr.cleared == 0 {
+                                        var_mr.cleared = node.range().start_point.row;
+                                    }
                                 }
                             }
                         }
@@ -603,6 +611,11 @@ fn field_capture_impl(
         let mut cursor = node.walk();
         let mut fields = vec![];
         for field in node.children_by_field_name("field", &mut cursor) {
+            // Avoids false completions where the current line merges with the next to make a field_expression
+            // It's probably wrong anyway...
+            if field.range().start_point.row != node.range().start_point.row {
+                break;
+            }
             match field.kind() {
                 "identifier" => {
                     if let Ok(name) = field
@@ -835,7 +848,7 @@ fn ref_to_var(
     for (_, ws) in scopes.iter().flat_map(|i| functions.get(i)) {
         for v in ws.variables.iter().rev() {
             let v_ref = v.borrow();
-            if v_ref.cleared {
+            if v_ref.cleared > 0 {
                 continue;
             }
             if v_ref.name == name {
@@ -868,7 +881,7 @@ fn ref_to_var(
     {
         for v in workspace.variables.iter().rev() {
             let v_ref = v.borrow();
-            if v_ref.cleared {
+            if v_ref.cleared > 0 {
                 continue;
             }
             if v_ref.name == name {
@@ -1037,7 +1050,7 @@ fn def_var(
         let definition = VariableDefinition {
             loc: node.range().into(),
             name: name.clone(),
-            cleared: false,
+            cleared: 0,
             is_parameter,
         };
         let definition = Arc::new(AtomicRefCell::new(definition));

@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::process::ExitCode;
 use std::sync::MutexGuard;
 
+use crate::analysis::completion;
 use crate::analysis::hover::hover_for_symbol;
 use crate::analysis::references::find_references_to_symbol;
 use crate::analysis::semantic::semantic_tokens;
@@ -20,14 +21,15 @@ use anyhow::{anyhow, Context, Result};
 use log::{debug, info};
 use lsp_server::{ExtractError, Message, Request, RequestId, Response};
 use lsp_types::request::{
-    DocumentHighlightRequest, FoldingRangeRequest, Formatting, GotoDefinition, HoverRequest,
-    References, Rename, SemanticTokensFullRequest, Shutdown,
+    Completion, DocumentHighlightRequest, FoldingRangeRequest, Formatting, GotoDefinition,
+    HoverRequest, References, Rename, SemanticTokensFullRequest, Shutdown,
 };
 use lsp_types::{
-    DocumentFormattingParams, DocumentHighlight, DocumentHighlightParams, FoldingRange,
-    FoldingRangeKind, FoldingRangeParams, GotoDefinitionParams, GotoDefinitionResponse, Hover,
-    HoverContents, HoverParams, Location, MarkupKind, Position, ReferenceParams, RenameParams,
-    SemanticTokens, SemanticTokensParams, TextEdit, Url, WorkspaceEdit,
+    CompletionParams, DocumentFormattingParams, DocumentHighlight, DocumentHighlightParams,
+    FoldingRange, FoldingRangeKind, FoldingRangeParams, GotoDefinitionParams,
+    GotoDefinitionResponse, Hover, HoverContents, HoverParams, Location, MarkupKind, Position,
+    ReferenceParams, RenameParams, SemanticTokens, SemanticTokensParams, TextEdit, Url,
+    WorkspaceEdit,
 };
 use regex::Regex;
 use tree_sitter::{Point, Query, QueryCursor};
@@ -54,6 +56,7 @@ pub fn handle_request(state: SessionStateArc, request: &Request) -> Result<Optio
         .handle::<DocumentHighlightRequest>(&mut lock, handle_highlight)?
         .handle::<FoldingRangeRequest>(&mut lock, handle_folding)?
         .handle::<SemanticTokensFullRequest>(&mut lock, handle_semantic)?
+        .handle::<Completion>(&mut lock, handle_completion)?
         .handle::<Shutdown>(&mut lock, handle_shutdown)?
         .finish()
 }
@@ -434,6 +437,35 @@ fn handle_semantic(
             data: response,
         };
         let resp = Response::new_ok(id, sts);
+        state.sender.send(Message::Response(resp))?;
+    } else {
+        let resp = Response::new_err(
+            id,
+            lsp_server::ErrorCode::InvalidParams as i32,
+            "File not found.".to_owned(),
+        );
+        state.sender.send(Message::Response(resp))?;
+    }
+    Ok(None)
+}
+
+fn handle_completion(
+    state: &mut MutexGuard<'_, &mut SessionState>,
+    id: RequestId,
+    params: CompletionParams,
+) -> Result<Option<ExitCode>> {
+    info!("Received textDocument/completion.");
+    let path = params
+        .text_document_position
+        .text_document
+        .uri
+        .path()
+        .to_string();
+    if let Some(file) = state.files.get(&path) {
+        let parsed_file = file.borrow_mut();
+        let response =
+            completion::complete(state, &parsed_file, params.text_document_position.position)?;
+        let resp = Response::new_ok(id, response);
         state.sender.send(Message::Response(resp))?;
     } else {
         let resp = Response::new_err(

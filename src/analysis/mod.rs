@@ -9,3 +9,4 @@ pub mod references;
 pub mod hover;
 pub mod semantic;
 pub mod diagnostics;
+pub mod completion;

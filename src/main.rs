@@ -30,10 +30,10 @@ use anyhow::Result;
 use log::{debug, error, info};
 use lsp_server::{Connection, Message};
 use lsp_types::{
-    FoldingRangeProviderCapability, HoverProviderCapability, OneOf, PositionEncodingKind,
-    SemanticTokenType, SemanticTokensFullOptions, SemanticTokensLegend, SemanticTokensOptions,
-    SemanticTokensServerCapabilities, TextDocumentSyncCapability, TextDocumentSyncKind,
-    TextDocumentSyncOptions, WorkDoneProgressOptions,
+    CompletionOptions, FoldingRangeProviderCapability, HoverProviderCapability, OneOf,
+    PositionEncodingKind, SemanticTokenType, SemanticTokensFullOptions, SemanticTokensLegend,
+    SemanticTokensOptions, SemanticTokensServerCapabilities, TextDocumentSyncCapability,
+    TextDocumentSyncKind, TextDocumentSyncOptions, WorkDoneProgressOptions,
 };
 use lsp_types::{SaveOptions, ServerCapabilities};
 use process_alive::Pid;
@@ -107,6 +107,7 @@ fn start_server(arguments: Arguments) -> Result<ExitCode> {
         SemanticTokenType::OPERATOR,
     ];
     let server_capabilities = serde_json::to_value(ServerCapabilities {
+        position_encoding: Some(PositionEncodingKind::UTF8),
         text_document_sync: Some(TextDocumentSyncCapability::Options(
             TextDocumentSyncOptions {
                 change: Some(TextDocumentSyncKind::INCREMENTAL),
@@ -121,13 +122,21 @@ fn start_server(arguments: Arguments) -> Result<ExitCode> {
                 ),
             },
         )),
-        position_encoding: Some(PositionEncodingKind::UTF8),
-        document_formatting_provider: Some(OneOf::Left(true)),
+        hover_provider: Some(HoverProviderCapability::Simple(true)),
+        completion_provider: Some(CompletionOptions {
+            resolve_provider: Some(false),
+            trigger_characters: Some(vec![".".to_string()]),
+            all_commit_characters: None,
+            work_done_progress_options: WorkDoneProgressOptions {
+                work_done_progress: Some(false),
+            },
+            completion_item: None,
+        }),
         definition_provider: Some(OneOf::Left(true)),
         references_provider: Some(OneOf::Left(true)),
-        rename_provider: Some(OneOf::Left(true)),
-        hover_provider: Some(HoverProviderCapability::Simple(true)),
         document_highlight_provider: Some(OneOf::Left(true)),
+        document_formatting_provider: Some(OneOf::Left(true)),
+        rename_provider: Some(OneOf::Left(true)),
         folding_range_provider: Some(FoldingRangeProviderCapability::Simple(true)),
         semantic_tokens_provider: Some(SemanticTokensServerCapabilities::SemanticTokensOptions(
             SemanticTokensOptions {
