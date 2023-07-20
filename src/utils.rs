@@ -153,7 +153,7 @@ fn remove_references_to_file(
 ) -> Result<()> {
     'out: for v1 in file.workspace.functions.values() {
         for (name, v2) in &state.workspace.functions.clone() {
-            if Arc::ptr_eq(v1, v2) {
+            if Arc::ptr_eq(v1, v2) && Arc::ptr_eq(&v1.borrow().parsed_file, &parsed_file) {
                 state.workspace.functions.remove(name);
                 break 'out;
             }
@@ -161,15 +161,15 @@ fn remove_references_to_file(
     }
     'out: for v1 in file.workspace.classes.values() {
         for (name, v2) in &state.workspace.classes.clone() {
-            if Arc::ptr_eq(v1, v2) {
-                state.workspace.functions.remove(name);
+            if Arc::ptr_eq(v1, v2) && Arc::ptr_eq(&v1.borrow().parsed_file, &parsed_file) {
+                state.workspace.classes.remove(name);
                 break 'out;
             }
         }
     }
     for (name, v1) in &state.workspace.scripts.clone() {
         if Arc::ptr_eq(v1, &parsed_file) {
-            state.workspace.functions.remove(name);
+            state.workspace.scripts.remove(name);
             break;
         }
     }
