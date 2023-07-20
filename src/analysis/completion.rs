@@ -8,6 +8,7 @@ use std::sync::MutexGuard;
 
 use atomic_refcell::AtomicRefMut;
 use itertools::Itertools;
+use log::debug;
 use lsp_types::{
     CompletionItem, CompletionItemKind, InsertTextFormat, MarkupContent, MarkupKind, Position,
 };
@@ -184,6 +185,8 @@ fn function_completions(
     text: &str,
 ) -> Vec<CompletionItem> {
     let mut completions = vec![];
+    debug!("{:#?}", state.workspace.functions);
+    debug!("{:#?}", pf_mr.workspace.functions);
     let functions = state
         .workspace
         .functions
@@ -210,7 +213,7 @@ fn function_completions(
             let function = function.borrow();
             let insert_text = format!(
                 "{}({})",
-                function.name,
+                name,
                 function
                     .signature
                     .argin_names
