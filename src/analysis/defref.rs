@@ -1043,18 +1043,9 @@ fn def_var(
         let vref = Arc::new(AtomicRefCell::new(vref.first().unwrap().clone()));
         workspace.references.push(vref);
     } else {
-        let mut is_parameter = false;
-        let mut is_global = false;
-        if let Some(parent) = node.parent() {
-            if parent.kind() == "function_output"
-                || parent.kind() == "function_arguments"
-                || parent.kind() == "multioutput_variable"
-            {
-                is_parameter = true;
-            } else if parent.kind() == "global_operator" {
-                is_global = true;
-            }
-        }
+        let is_global = parent_of_kind("global_operator", node).is_some();
+        let is_parameter = parent_of_kind("function_output", node).is_some()
+            || parent_of_kind("function_arguments", node).is_some();
         let definition = VariableDefinition {
             loc: node.range().into(),
             name: name.clone(),
