@@ -51,7 +51,8 @@ pub fn diagnotiscs(
     }
     for reference in &parsed_file.workspace.references {
         let ref_ref = reference.borrow();
-        if ref_ref.name.contains('.') {
+        let built_in = vec!["nargin", "nargout", "eps"];
+        if ref_ref.name.contains('.') || built_in.iter().any(|v| ref_ref.name == *v) {
             continue;
         }
         if let crate::types::ReferenceTarget::UnknownVariable = ref_ref.target {
