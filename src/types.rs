@@ -244,6 +244,9 @@ impl Range {
         let mut col = 0;
         let mut start_byte = 0;
         let mut end_byte = 0;
+        if parsed_file.contents.is_empty() {
+            return Range::default().into();
+        }
         let mut chars = parsed_file.contents.chars();
         if let Some(tree) = &parsed_file.tree {
             if let Some(node) = tree
@@ -253,6 +256,9 @@ impl Range {
                 byte = node.start_byte();
                 row = node.start_position().row;
                 col = node.start_position().column;
+                if parsed_file.contents.len() <= byte {
+                    return Range::default().into();
+                }
                 chars = parsed_file.contents[byte..].chars();
             }
         }
