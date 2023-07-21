@@ -5,6 +5,7 @@
  */
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::{Arc, MutexGuard};
 use std::thread::{spawn, JoinHandle};
 
@@ -19,8 +20,8 @@ use crate::code_loc;
 use crate::parsed_file::{FileType, ParsedFile};
 pub use crate::types::{ClassFolder, Namespace, SessionState};
 use crate::utils::{
-    lock_mutex, rescan_file, send_progress_begin, send_progress_end, send_progress_report,
-    SessionStateArc,
+    lock_mutex, remove_references_to_file, rescan_file, send_progress_begin, send_progress_end,
+    send_progress_report, SessionStateArc,
 };
 
 type FileTuple = (
@@ -126,6 +127,11 @@ impl SessionState {
         for _ in 0..2 {
             for (i, file) in state.files.clone().values().enumerate() {
                 let file = Arc::clone(file);
+                if std::fs::metadata(Path::new(&file.borrow().path)).is_err() {
+                    remove_references_to_file(state, &file.borrow_mut(), Arc::clone(&file))?;
+                    state.files.remove(&file.borrow().path);
+                    continue;
+                }
                 if !file.borrow().path.starts_with(&project_path) {
                     continue;
                 }

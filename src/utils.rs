@@ -146,7 +146,7 @@ pub fn rescan_file(
     Ok(())
 }
 
-fn remove_references_to_file(
+pub fn remove_references_to_file(
     state: &mut MutexGuard<'_, &mut SessionState>,
     file: &AtomicRefMut<'_, ParsedFile>,
     parsed_file: Arc<AtomicRefCell<ParsedFile>>,
