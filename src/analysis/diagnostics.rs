@@ -51,7 +51,7 @@ pub fn diagnotiscs(
     }
     for reference in &parsed_file.workspace.references {
         let ref_ref = reference.borrow();
-        let built_in = vec!["nargin", "nargout", "eps"];
+        let built_in = vec!["nargin", "nargout", "eps", "pi"];
         if ref_ref.name.contains('.') || built_in.iter().any(|v| ref_ref.name == *v) {
             continue;
         }
