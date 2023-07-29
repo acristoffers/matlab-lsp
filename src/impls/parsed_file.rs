@@ -25,7 +25,13 @@ impl ParsedFile {
         Ok(ParsedFile {
             tree: ParsedFile::ts_parse(&contents)?,
             contents,
-            name: path.split('/').last().unwrap_or("").into(),
+            name: path
+                .split('/')
+                .last()
+                .unwrap_or("")
+                .strip_suffix(".m")
+                .unwrap_or("")
+                .into(),
             path,
             open: false,
             timestamp: Instant::now(),
