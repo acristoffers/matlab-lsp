@@ -4,9 +4,6 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-pub mod defref;
-pub mod references;
-pub mod hover;
-pub mod semantic;
-pub mod diagnostics;
-pub mod completion;
+pub mod fast;
+pub mod full;
+pub mod symbols;

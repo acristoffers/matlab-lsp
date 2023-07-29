@@ -4,38 +4,35 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-mod analysis;
 mod args;
-mod formatter;
+mod extractors;
+mod features;
 mod handlers;
-mod parsed_file;
-mod session_state;
+mod impls;
+mod threads;
 mod types;
 mod utils;
 
-use std::collections::HashMap;
 use std::fs::OpenOptions;
 use std::process::ExitCode;
-use std::sync::{Arc, Mutex};
+use std::thread::{spawn, JoinHandle};
 
-use crate::types::Workspace;
-
-use self::session_state::SessionState;
-use self::utils::{lock_mutex, SessionStateArc};
 use args::{Arguments, Parser};
-use crossbeam_channel::Receiver;
-use handlers::{handle_notification, handle_request};
+use threads::{background_worker, dispatcher, handler};
+use types::{MessagePayload, SenderThread, ThreadMessage};
 
 use anyhow::Result;
+use crossbeam_channel::{Receiver, Sender};
 use log::{debug, error, info};
 use lsp_server::{Connection, Message};
+use lsp_types::notification::{Exit, Notification};
 use lsp_types::{
-    CompletionOptions, FoldingRangeProviderCapability, HoverProviderCapability, OneOf,
-    PositionEncodingKind, SemanticTokenType, SemanticTokensFullOptions, SemanticTokensLegend,
-    SemanticTokensOptions, SemanticTokensServerCapabilities, TextDocumentSyncCapability,
-    TextDocumentSyncKind, TextDocumentSyncOptions, WorkDoneProgressOptions,
+    FoldingRangeProviderCapability, HoverProviderCapability, InitializeParams, OneOf,
+    PositionEncodingKind, SaveOptions, SemanticTokenType, SemanticTokensFullOptions,
+    SemanticTokensLegend, SemanticTokensOptions, SemanticTokensServerCapabilities,
+    ServerCapabilities, TextDocumentSyncCapability, TextDocumentSyncKind, TextDocumentSyncOptions,
+    WorkDoneProgressOptions, CompletionOptions,
 };
-use lsp_types::{SaveOptions, ServerCapabilities};
 use process_alive::Pid;
 use simplelog::{CombinedLogger, Config, WriteLogger};
 
@@ -82,6 +79,29 @@ fn configure_logger() -> Result<()> {
 
 fn start_server(arguments: Arguments) -> Result<ExitCode> {
     let (connection, _io_threads) = Connection::stdio();
+    let server_capabilities = serde_json::to_value(server_capabilities())?;
+    let initialization_params = connection.initialize(server_capabilities)?;
+    let initialization_params: InitializeParams = serde_json::from_value(initialization_params)?;
+    let pid = initialization_params.process_id;
+    let (threads, sender) =
+        start_threads(arguments, initialization_params, connection.sender.clone());
+    let result = main_loop(sender, connection.receiver.clone(), pid);
+    debug!("Left main loop. Joining threads and shutting down.");
+    for handle in threads {
+        match handle.join() {
+            Err(err) => {
+                error!("Thread paniced? {:?}", err.downcast_ref::<String>());
+            }
+            Ok(Ok(_)) => info!("Thread joined."),
+            Ok(Err(err)) => {
+                error!("Thread returned error: {err}");
+            }
+        }
+    }
+    result
+}
+
+fn server_capabilities() -> ServerCapabilities {
     let semantic_token_types = vec![
         SemanticTokenType::NAMESPACE,
         SemanticTokenType::TYPE,
@@ -106,7 +126,7 @@ fn start_server(arguments: Arguments) -> Result<ExitCode> {
         SemanticTokenType::REGEXP,
         SemanticTokenType::OPERATOR,
     ];
-    let server_capabilities = serde_json::to_value(ServerCapabilities {
+    ServerCapabilities {
         position_encoding: Some(PositionEncodingKind::UTF8),
         text_document_sync: Some(TextDocumentSyncCapability::Options(
             TextDocumentSyncOptions {
@@ -135,7 +155,7 @@ fn start_server(arguments: Arguments) -> Result<ExitCode> {
         definition_provider: Some(OneOf::Left(true)),
         references_provider: Some(OneOf::Left(true)),
         document_highlight_provider: Some(OneOf::Left(true)),
-        document_formatting_provider: Some(OneOf::Left(true)),
+        document_formatting_provider: Some(lsp_types::OneOf::Left(true)),
         rename_provider: Some(OneOf::Left(true)),
         folding_range_provider: Some(FoldingRangeProviderCapability::Simple(true)),
         semantic_tokens_provider: Some(SemanticTokensServerCapabilities::SemanticTokensOptions(
@@ -152,73 +172,74 @@ fn start_server(arguments: Arguments) -> Result<ExitCode> {
             },
         )),
         ..Default::default()
-    })?;
-    let initialization_params = connection.initialize(server_capabilities)?;
-    let session_state = SessionState {
-        path: if let Some(path) = arguments.path {
-            path.split(':').map(String::from).collect()
-        } else {
-            vec![]
-        },
-        sender: connection.sender,
-        workspace_params: serde_json::from_value(initialization_params)?,
-        client_requested_shutdown: false,
-        rescan_open_files: true,
-        rescan_all_files: true,
-        files: HashMap::new(),
-        workspace: Workspace::default(),
-        request_id: 0,
-    };
-    let pid = session_state.workspace_params.process_id;
-    let session_state: &'static mut SessionState = Box::leak(Box::new(session_state));
-    let state_arc: SessionStateArc = Arc::new(Mutex::new(session_state));
-    let handle = SessionState::start_worker(Arc::clone(&state_arc))?;
-    let result = main_loop(Arc::clone(&state_arc), &connection.receiver, pid);
-    debug!("Left main loop. Joining threads and shutting down.");
-    match handle.join() {
-        Err(err) => {
-            error!("Thread paniced? {:?}", err.downcast_ref::<String>());
-        }
-        Ok(Ok(_)) => info!("Thread joined."),
-        Ok(Err(err)) => {
-            error!("Thread returned error: {err}");
-        }
     }
-    result
+}
+
+fn start_threads(
+    arguments: Arguments,
+    init: InitializeParams,
+    lsp_sender: Sender<Message>,
+) -> (Vec<JoinHandle<Result<()>>>, Sender<ThreadMessage>) {
+    let mut handlers = vec![];
+    let (dispatcher_sender, dispatcher_receiver) = crossbeam_channel::unbounded();
+    let (handler_sender, handler_receiver) = crossbeam_channel::unbounded();
+    let (bw_sender, bw_receiver) = crossbeam_channel::unbounded();
+    let handler = spawn(move || -> Result<()> {
+        dispatcher::start(
+            arguments,
+            init,
+            dispatcher_receiver,
+            handler_sender,
+            bw_sender,
+        )
+    });
+    handlers.push(handler);
+    let ds_clone = dispatcher_sender.clone();
+    let lsp_sender_clone = lsp_sender.clone();
+    let handler = spawn(move || -> Result<()> {
+        handler::start(lsp_sender_clone, ds_clone, handler_receiver)
+    });
+    handlers.push(handler);
+    let ds_clone = dispatcher_sender.clone();
+    let handler = spawn(move || -> Result<()> {
+        background_worker::start(lsp_sender, ds_clone, bw_receiver)
+    });
+    handlers.push(handler);
+    (handlers, dispatcher_sender)
 }
 
 fn main_loop(
-    state: SessionStateArc,
-    receiver: &Receiver<Message>,
+    sender: Sender<ThreadMessage>,
+    receiver: Receiver<Message>,
     pid: Option<u32>,
 ) -> Result<ExitCode> {
     loop {
         if let Some(pid) = pid {
             let pid = Pid::from(pid);
             if let process_alive::State::Dead = process_alive::state(pid) {
-                let mut lock = lock_mutex(&state)?;
                 info!("Editor is dead, leaving.");
-                lock.client_requested_shutdown = true;
-                lock.rescan_open_files = false;
-                lock.rescan_all_files = false;
+                sender.send(ThreadMessage {
+                    sender: SenderThread::Main,
+                    payload: MessagePayload::Exit,
+                })?;
                 break;
             }
         }
         if let Ok(msg) = receiver.recv() {
-            match process_message(Arc::clone(&state), &msg) {
-                Ok(Some(error_code)) => return Ok(error_code),
-                Ok(None) => {}
-                Err(err) => error!("Error processing {msg:?}: {err:?}"),
+            if let Message::Notification(not) = &msg {
+                if not.method == Exit::METHOD {
+                    sender.send(ThreadMessage {
+                        sender: SenderThread::Main,
+                        payload: MessagePayload::Exit,
+                    })?;
+                    break;
+                }
             }
+            sender.send(ThreadMessage {
+                sender: SenderThread::Main,
+                payload: MessagePayload::LspMessage(msg),
+            })?;
         }
     }
     Ok(ExitCode::SUCCESS)
-}
-
-fn process_message(state: SessionStateArc, msg: &Message) -> Result<Option<ExitCode>> {
-    match msg {
-        Message::Request(req) => handle_request(Arc::clone(&state), req),
-        Message::Response(_resp) => Ok(None),
-        Message::Notification(not) => handle_notification(Arc::clone(&state), not),
-    }
 }

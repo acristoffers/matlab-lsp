@@ -5,106 +5,103 @@
  */
 
 use std::collections::HashMap;
-use std::process::ExitCode;
-use std::sync::MutexGuard;
 
-use crate::analysis::completion;
-use crate::analysis::hover::hover_for_symbol;
-use crate::analysis::references::find_references_to_symbol;
-use crate::analysis::semantic::semantic_tokens;
-use crate::code_loc;
-use crate::session_state::SessionState;
-use crate::types::{PointToPos, PosToPoint, Range};
-use crate::utils::{lock_mutex, SessionStateArc};
+use crate::features::completion::complete;
+use crate::features::hover::hover_for_symbol;
+use crate::features::references::find_references_to_symbol;
+use crate::features::semantic::semantic_tokens;
+use crate::impls::range::{PointToPos, PosToPoint};
+use crate::threads::db::db_get_parsed_file;
+use crate::types::{Range, SenderThread, ThreadMessage};
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, Result};
+use crossbeam_channel::{Receiver, Sender};
 use log::{debug, info};
 use lsp_server::{ExtractError, Message, Request, RequestId, Response};
 use lsp_types::request::{
     Completion, DocumentHighlightRequest, FoldingRangeRequest, Formatting, GotoDefinition,
-    HoverRequest, References, Rename, SemanticTokensFullRequest, Shutdown,
+    HoverRequest, References, Rename, SemanticTokensFullRequest,
 };
 use lsp_types::{
     CompletionParams, DocumentFormattingParams, DocumentHighlight, DocumentHighlightParams,
     FoldingRange, FoldingRangeKind, FoldingRangeParams, GotoDefinitionParams,
-    GotoDefinitionResponse, Hover, HoverContents, HoverParams, Location, MarkupKind, Position,
-    ReferenceParams, RenameParams, SemanticTokens, SemanticTokensParams, TextEdit, Url,
-    WorkspaceEdit,
+    GotoDefinitionResponse, Hover, HoverContents, HoverParams, Location, Position, ReferenceParams,
+    RenameParams, SemanticTokens, SemanticTokensParams, TextEdit, Url, WorkspaceEdit,
 };
 use regex::Regex;
 use tree_sitter::{Point, Query, QueryCursor};
 
-pub fn handle_request(state: SessionStateArc, request: &Request) -> Result<Option<ExitCode>> {
-    debug!("Handling a request.");
-    let mut lock = lock_mutex(&state)?;
-    if lock.client_requested_shutdown {
-        let resp = Response::new_err(
-            request.id.clone(),
-            lsp_server::ErrorCode::InvalidRequest as i32,
-            "Shutdown already requested.".to_owned(),
-        );
-        lock.sender.send(Message::Response(resp))?;
-        return Err(anyhow!("Got a request after a shutdown."));
-    }
-    let mut dispatcher = Dispatcher::new(request);
+pub fn handle_request(
+    lsp_sender: Sender<Message>,
+    sender: Sender<ThreadMessage>,
+    receiver: Receiver<ThreadMessage>,
+    request: Request,
+) -> Result<()> {
+    let mut dispatcher = Dispatcher::new(lsp_sender, sender, receiver, request);
     dispatcher
-        .handle::<Formatting>(&mut lock, handle_formatting)?
-        .handle::<GotoDefinition>(&mut lock, handle_goto_definition)?
-        .handle::<References>(&mut lock, handle_references)?
-        .handle::<Rename>(&mut lock, handle_rename)?
-        .handle::<HoverRequest>(&mut lock, handle_hover)?
-        .handle::<DocumentHighlightRequest>(&mut lock, handle_highlight)?
-        .handle::<FoldingRangeRequest>(&mut lock, handle_folding)?
-        .handle::<SemanticTokensFullRequest>(&mut lock, handle_semantic)?
-        .handle::<Completion>(&mut lock, handle_completion)?
-        .handle::<Shutdown>(&mut lock, handle_shutdown)?
+        .handle::<Formatting>(handle_formatting)
+        .handle::<GotoDefinition>(handle_goto_definition)
+        .handle::<References>(handle_references)
+        .handle::<Rename>(handle_rename)
+        .handle::<HoverRequest>(handle_hover)
+        .handle::<DocumentHighlightRequest>(handle_highlight)
+        .handle::<FoldingRangeRequest>(handle_folding)
+        .handle::<SemanticTokensFullRequest>(handle_semantic)
+        .handle::<Completion>(handle_completion)
         .finish()
 }
 
-struct Dispatcher<'a> {
-    request: &'a Request,
-    result: Option<Result<Option<ExitCode>>>,
+struct Dispatcher {
+    lsp_sender: Sender<Message>,
+    sender: Sender<ThreadMessage>,
+    receiver: Receiver<ThreadMessage>,
+    request: Request,
+    result: Option<Result<()>>,
 }
 
 type Callback<P> =
-    fn(&mut MutexGuard<'_, &mut SessionState>, RequestId, P) -> Result<Option<ExitCode>>;
+    fn(Sender<Message>, Sender<ThreadMessage>, Receiver<ThreadMessage>, RequestId, P) -> Result<()>;
 
-impl Dispatcher<'_> {
-    fn new(request: &Request) -> Dispatcher {
+impl Dispatcher {
+    fn new(
+        lsp_sender: Sender<Message>,
+        sender: Sender<ThreadMessage>,
+        receiver: Receiver<ThreadMessage>,
+        request: Request,
+    ) -> Dispatcher {
         Dispatcher {
+            lsp_sender,
+            sender,
+            receiver,
             request,
             result: None,
         }
     }
 
-    fn handle<R>(
-        &mut self,
-        state: &mut MutexGuard<'_, &mut SessionState>,
-        function: Callback<R::Params>,
-    ) -> Result<&mut Self>
+    fn handle<R>(&mut self, function: Callback<R::Params>) -> &mut Self
     where
         R: lsp_types::request::Request,
         R::Params: serde::de::DeserializeOwned,
     {
-        match cast::<R>(self.request.clone()) {
-            Ok((id, params)) => {
-                self.result = Some(function(state, id, params));
-            }
-            Err(err @ ExtractError::JsonError { .. }) => {
-                self.result = Some(Err(anyhow!("JsonError: {err:?}")));
-            }
-            Err(ExtractError::MethodMismatch(req)) => {
-                if self.result.is_none() {
-                    self.result = Some(Err(anyhow!("MethodMismatch: {req:?}")));
-                }
-            }
+        let result = match cast::<R>(self.request.clone()) {
+            Ok((id, params)) => function(
+                self.lsp_sender.clone(),
+                self.sender.clone(),
+                self.receiver.clone(),
+                id,
+                params,
+            ),
+            Err(err @ ExtractError::JsonError { .. }) => Err(anyhow!("JsonError: {err:?}")),
+            Err(ExtractError::MethodMismatch(req)) => Err(anyhow!("MethodMismatch: {req:?}")),
         };
-        Ok(self)
+        if result.is_ok() || self.result.is_none() {
+            self.result = Some(result);
+        }
+        self
     }
 
-    fn finish(&mut self) -> Result<Option<ExitCode>> {
-        let result = self.result.take();
-        result.unwrap_or(Ok(None))
+    fn finish(&mut self) -> Result<()> {
+        self.result.take().unwrap_or(Ok(()))
     }
 }
 
@@ -117,22 +114,22 @@ where
 }
 
 fn handle_formatting(
-    state: &mut MutexGuard<'_, &mut SessionState>,
+    lsp_sender: Sender<Message>,
+    sender: Sender<ThreadMessage>,
+    receiver: Receiver<ThreadMessage>,
     id: RequestId,
     params: DocumentFormattingParams,
-) -> Result<Option<ExitCode>> {
+) -> Result<()> {
     info!("Formatting {}", params.text_document.uri.as_str());
-    let file = state
-        .files
-        .get_mut(&params.text_document.uri.path().to_string())
-        .with_context(|| "No file parsed")?;
-    let mut file = file.borrow_mut();
-    let pos = file
-        .tree
-        .as_ref()
-        .ok_or(code_loc!())?
-        .root_node()
-        .end_position();
+    let path = params.text_document.uri.path();
+    let mut file = if let Some(file) =
+        db_get_parsed_file(&sender, &receiver, path.to_string(), SenderThread::Handler)
+    {
+        file.as_ref().clone()
+    } else {
+        return Ok(());
+    };
+    let pos = file.tree.root_node().end_position();
     if let Some(code) = file.format() {
         let result = vec![TextEdit {
             range: lsp_types::Range {
@@ -147,28 +144,28 @@ fn handle_formatting(
             result: Some(result),
             error: None,
         };
-        drop(file);
-        state.sender.send(Message::Response(resp))?;
+        lsp_sender.send(Message::Response(resp))?;
     } else {
         return Err(anyhow!("Error formatting"));
     }
-    Ok(None)
+    Ok(())
 }
 
 fn handle_goto_definition(
-    state: &mut MutexGuard<'_, &mut SessionState>,
+    lsp_sender: Sender<Message>,
+    sender: Sender<ThreadMessage>,
+    receiver: Receiver<ThreadMessage>,
     id: RequestId,
     params: GotoDefinitionParams,
-) -> Result<Option<ExitCode>> {
+) -> Result<()> {
     let uri = params.text_document_position_params.text_document.uri;
-    let file = uri.path();
+    let path = uri.path().to_string();
     let loc = params.text_document_position_params.position;
     let loc = Point {
         row: loc.line.try_into()?,
         column: loc.character.try_into()?,
     };
-    if let Some(file) = state.files.get(file) {
-        let file = file.borrow_mut();
+    if let Some(file) = db_get_parsed_file(&sender, &receiver, path, SenderThread::Handler) {
         debug!("Goto Definition for file {}", file.path);
         debug!(
             "File contains {} references",
@@ -181,16 +178,8 @@ fn handle_goto_definition(
             if r.loc.contains(loc) {
                 debug!("Point in range, matching.");
                 let resp = match &r.target {
-                    crate::types::ReferenceTarget::Class(cls) => {
-                        let path = cls.borrow().parsed_file.borrow().path.clone();
-                        let path = String::from("file://") + path.as_str();
-                        Some(GotoDefinitionResponse::from(Location::new(
-                            Url::parse(path.as_str())?,
-                            Range::default().into(),
-                        )))
-                    }
                     crate::types::ReferenceTarget::Function(fun) => {
-                        let path = fun.borrow().parsed_file.borrow().path.clone();
+                        let path = fun.borrow().path.clone();
                         let path = String::from("file://") + path.as_str();
                         Some(GotoDefinitionResponse::from(Location::new(
                             Url::parse(path.as_str())?,
@@ -203,8 +192,7 @@ fn handle_goto_definition(
                             var.borrow_mut().loc.into(),
                         )))
                     }
-                    crate::types::ReferenceTarget::Script(scr) => {
-                        let path = scr.borrow().path.clone();
+                    crate::types::ReferenceTarget::Script(path) => {
                         let path = String::from("file://") + path.as_str();
                         Some(GotoDefinitionResponse::from(Location::new(
                             Url::parse(path.as_str())?,
@@ -212,36 +200,37 @@ fn handle_goto_definition(
                         )))
                     }
                     crate::types::ReferenceTarget::Namespace(_) => None,
-                    crate::types::ReferenceTarget::ClassFolder(_) => None,
                     crate::types::ReferenceTarget::UnknownVariable => None,
                     crate::types::ReferenceTarget::UnknownFunction => None,
                 };
                 if let Some(resp) = resp {
                     let resp = Response::new_ok(id, resp);
-                    state.sender.send(Message::Response(resp))?;
+                    lsp_sender.send(Message::Response(resp))?;
                 } else {
                     debug!("Matched, got None");
                     let resp = Response::new_ok(id, ());
-                    let _ = state.sender.send(resp.into());
+                    let _ = lsp_sender.send(resp.into());
                 }
-                return Ok(None);
+                return Ok(());
             }
         }
         debug!("Point not in range.");
         let resp = Response::new_ok(id, ());
-        let _ = state.sender.send(resp.into());
+        let _ = lsp_sender.send(resp.into());
     } else {
         let resp = Response::new_err(id, 0, "Could not find file.".into());
-        let _ = state.sender.send(resp.into());
+        let _ = lsp_sender.send(resp.into());
     }
-    Ok(None)
+    Ok(())
 }
 
 fn handle_references(
-    state: &mut MutexGuard<'_, &mut SessionState>,
+    lsp_sender: Sender<Message>,
+    sender: Sender<ThreadMessage>,
+    receiver: Receiver<ThreadMessage>,
     id: RequestId,
     params: ReferenceParams,
-) -> Result<Option<ExitCode>> {
+) -> Result<()> {
     info!("Received textDocument/references.");
     let include_declaration = params.context.include_declaration;
     let path = params
@@ -251,23 +240,31 @@ fn handle_references(
         .path()
         .to_string();
     let loc = params.text_document_position.position.to_point();
-    if let Ok(rs) = find_references_to_symbol(state, path, loc, include_declaration) {
+    if let Ok(rs) = find_references_to_symbol(
+        sender.clone(),
+        receiver.clone(),
+        path,
+        loc,
+        include_declaration,
+    ) {
         let rs: Vec<&Location> = rs.iter().map(|(v, _)| v).collect();
         let result = serde_json::to_value(rs)?;
         let resp = Response::new_ok(id, result);
-        let _ = state.sender.send(resp.into());
+        let _ = lsp_sender.send(resp.into());
     } else {
         let resp = Response::new_err(id, 0, "Could not find file.".into());
-        let _ = state.sender.send(resp.into());
+        let _ = lsp_sender.send(resp.into());
     }
-    Ok(None)
+    Ok(())
 }
 
 fn handle_rename(
-    state: &mut MutexGuard<'_, &mut SessionState>,
+    lsp_sender: Sender<Message>,
+    sender: Sender<ThreadMessage>,
+    receiver: Receiver<ThreadMessage>,
     id: RequestId,
     params: RenameParams,
-) -> Result<Option<ExitCode>> {
+) -> Result<()> {
     info!("Received textDocument/references.");
     let path = params
         .text_document_position
@@ -284,10 +281,10 @@ fn handle_rename(
             lsp_server::ErrorCode::InvalidParams as i32,
             "The name is not a valid identifier.".to_owned(),
         );
-        state.sender.send(Message::Response(resp))?;
-        return Ok(None);
+        lsp_sender.send(Message::Response(resp))?;
+        return Ok(());
     }
-    let references = find_references_to_symbol(state, path, loc, true)?;
+    let references = find_references_to_symbol(sender.clone(), receiver.clone(), path, loc, true)?;
     let mut ws_edit: HashMap<Url, Vec<TextEdit>> = HashMap::new();
     for (reference, _) in references {
         let uri = reference.uri;
@@ -302,15 +299,17 @@ fn handle_rename(
     }
     let ws_edit = WorkspaceEdit::new(ws_edit);
     let resp = Response::new_ok(id, ws_edit);
-    state.sender.send(Message::Response(resp))?;
-    Ok(None)
+    lsp_sender.send(Message::Response(resp))?;
+    Ok(())
 }
 
 fn handle_hover(
-    state: &mut MutexGuard<'_, &mut SessionState>,
+    lsp_sender: Sender<Message>,
+    sender: Sender<ThreadMessage>,
+    receiver: Receiver<ThreadMessage>,
     id: RequestId,
     params: HoverParams,
-) -> Result<Option<ExitCode>> {
+) -> Result<()> {
     info!("Received textDocument/hover.");
     let path = params
         .text_document_position_params
@@ -319,40 +318,28 @@ fn handle_hover(
         .path()
         .to_string();
     let loc = params.text_document_position_params.position.to_point();
-    if let Some((md, plain)) = hover_for_symbol(state, path, loc)? {
-        if let Some(td) = &state.workspace_params.capabilities.text_document {
-            if let Some(hover) = &td.hover {
-                if let Some(cf) = &hover.content_format {
-                    if cf.contains(&MarkupKind::Markdown) {
-                        let response = Hover {
-                            contents: HoverContents::Markup(md),
-                            range: None,
-                        };
-                        let resp = Response::new_ok(id, response);
-                        state.sender.send(Message::Response(resp))?;
-                        return Ok(None);
-                    }
-                }
-            }
-        }
+    if let Some((md, _)) = hover_for_symbol(sender.clone(), receiver.clone(), path, loc)? {
         let response = Hover {
-            contents: HoverContents::Markup(plain),
+            contents: HoverContents::Markup(md),
             range: None,
         };
         let resp = Response::new_ok(id, response);
-        state.sender.send(Message::Response(resp))?;
+        lsp_sender.send(Message::Response(resp))?;
+        return Ok(());
     } else {
         let resp = Response::new_ok(id, ());
-        state.sender.send(Message::Response(resp))?;
+        lsp_sender.send(Message::Response(resp))?;
     }
-    Ok(None)
+    Ok(())
 }
 
 fn handle_highlight(
-    state: &mut MutexGuard<'_, &mut SessionState>,
+    lsp_sender: Sender<Message>,
+    sender: Sender<ThreadMessage>,
+    receiver: Receiver<ThreadMessage>,
     id: RequestId,
     params: DocumentHighlightParams,
-) -> Result<Option<ExitCode>> {
+) -> Result<()> {
     info!("Received textDocument/highlight.");
     let path = params
         .text_document_position_params
@@ -361,7 +348,8 @@ fn handle_highlight(
         .path()
         .to_string();
     let loc = params.text_document_position_params.position.to_point();
-    let locs = find_references_to_symbol(state, path.clone(), loc, true)?;
+    let locs =
+        find_references_to_symbol(sender.clone(), receiver.clone(), path.clone(), loc, true)?;
     let mut response = vec![];
     for (location, kind) in locs {
         if location.uri.path() == path {
@@ -373,87 +361,90 @@ fn handle_highlight(
         }
     }
     let resp = Response::new_ok(id, response);
-    state.sender.send(Message::Response(resp))?;
-    Ok(None)
+    lsp_sender.send(Message::Response(resp))?;
+    Ok(())
 }
 
 fn handle_folding(
-    state: &mut MutexGuard<'_, &mut SessionState>,
+    lsp_sender: Sender<Message>,
+    sender: Sender<ThreadMessage>,
+    receiver: Receiver<ThreadMessage>,
     id: RequestId,
     params: FoldingRangeParams,
-) -> Result<Option<ExitCode>> {
+) -> Result<()> {
     info!("Received textDocument/foldingRange.");
     let path = params.text_document.uri.path().to_string();
-    if let Some(file) = state.files.get(&path) {
-        let pf_ref = file.borrow();
-        if let Some(tree) = &pf_ref.tree {
-            let root = tree.root_node();
-            let scm = "(block) @block";
-            let query = Query::new(tree_sitter_matlab::language(), scm)?;
-            let mut cursor = QueryCursor::new();
-            let mut resp = vec![];
-            for node in cursor
-                .captures(&query, root, pf_ref.contents.as_bytes())
-                .map(|(c, _)| c)
-                .flat_map(|c| c.captures)
-                .map(|c| c.node)
-            {
-                let fold = FoldingRange {
-                    start_line: node.start_position().to_position().line,
-                    start_character: None,
-                    end_line: node.end_position().to_position().line,
-                    end_character: None,
-                    kind: Some(FoldingRangeKind::Region),
-                    collapsed_text: None,
-                };
-                resp.push(fold);
-            }
-            let resp = Response::new_ok(id, resp);
-            state.sender.send(Message::Response(resp))?;
-            return Ok(None);
+    if let Some(file) = db_get_parsed_file(&sender, &receiver, path, SenderThread::Handler) {
+        let tree = file.tree.clone();
+        let root = tree.root_node();
+        let scm = "(block) @block";
+        let query = Query::new(tree_sitter_matlab::language(), scm)?;
+        let mut cursor = QueryCursor::new();
+        let mut resp = vec![];
+        for node in cursor
+            .captures(&query, root, file.contents.as_bytes())
+            .map(|(c, _)| c)
+            .flat_map(|c| c.captures)
+            .map(|c| c.node)
+        {
+            let fold = FoldingRange {
+                start_line: node.start_position().to_position().line,
+                start_character: None,
+                end_line: node.end_position().to_position().line,
+                end_character: None,
+                kind: Some(FoldingRangeKind::Region),
+                collapsed_text: None,
+            };
+            resp.push(fold);
         }
+        let resp = Response::new_ok(id, resp);
+        lsp_sender.send(Message::Response(resp))?;
+        return Ok(());
     }
     let resp = Response::new_err(
         id,
         lsp_server::ErrorCode::InvalidParams as i32,
         "File was not yet parsed.".to_owned(),
     );
-    state.sender.send(Message::Response(resp))?;
-    Ok(None)
+    lsp_sender.send(Message::Response(resp))?;
+    Ok(())
 }
 
 fn handle_semantic(
-    state: &mut MutexGuard<'_, &mut SessionState>,
+    lsp_sender: Sender<Message>,
+    sender: Sender<ThreadMessage>,
+    receiver: Receiver<ThreadMessage>,
     id: RequestId,
     params: SemanticTokensParams,
-) -> Result<Option<ExitCode>> {
+) -> Result<()> {
     info!("Received textDocument/semanticTokens/full.");
     let path = params.text_document.uri.path().to_string();
-    if let Some(file) = state.files.get(&path) {
-        let parsed_file = file.borrow_mut();
-        let response = semantic_tokens(&parsed_file)?;
+    if let Some(file) = db_get_parsed_file(&sender, &receiver, path, SenderThread::Handler) {
+        let response = semantic_tokens(&file)?;
         let sts = SemanticTokens {
             result_id: None,
             data: response,
         };
         let resp = Response::new_ok(id, sts);
-        state.sender.send(Message::Response(resp))?;
+        lsp_sender.send(Message::Response(resp))?;
     } else {
         let resp = Response::new_err(
             id,
             lsp_server::ErrorCode::InvalidParams as i32,
             "File not found.".to_owned(),
         );
-        state.sender.send(Message::Response(resp))?;
+        lsp_sender.send(Message::Response(resp))?;
     }
-    Ok(None)
+    Ok(())
 }
 
 fn handle_completion(
-    state: &mut MutexGuard<'_, &mut SessionState>,
+    lsp_sender: Sender<Message>,
+    sender: Sender<ThreadMessage>,
+    receiver: Receiver<ThreadMessage>,
     id: RequestId,
     params: CompletionParams,
-) -> Result<Option<ExitCode>> {
+) -> Result<()> {
     info!("Received textDocument/completion.");
     let path = params
         .text_document_position
@@ -461,33 +452,22 @@ fn handle_completion(
         .uri
         .path()
         .to_string();
-    if let Some(file) = state.files.get(&path) {
-        let parsed_file = file.borrow_mut();
-        let response =
-            completion::complete(state, &parsed_file, params.text_document_position.position)?;
+    if let Some(file) = db_get_parsed_file(&sender, &receiver, path, SenderThread::Handler) {
+        let response = complete(
+            sender.clone(),
+            receiver.clone(),
+            file,
+            params.text_document_position.position,
+        )?;
         let resp = Response::new_ok(id, response);
-        state.sender.send(Message::Response(resp))?;
+        lsp_sender.send(Message::Response(resp))?;
     } else {
         let resp = Response::new_err(
             id,
             lsp_server::ErrorCode::InvalidParams as i32,
             "File not found.".to_owned(),
         );
-        state.sender.send(Message::Response(resp))?;
+        lsp_sender.send(Message::Response(resp))?;
     }
-    Ok(None)
-}
-
-fn handle_shutdown(
-    state: &mut MutexGuard<'_, &mut SessionState>,
-    id: RequestId,
-    _params: (),
-) -> Result<Option<ExitCode>> {
-    info!("Received shutdown request.");
-    state.client_requested_shutdown = true;
-    state.rescan_all_files = false;
-    state.rescan_open_files = false;
-    let resp = Response::new_ok(id, ());
-    let _ = state.sender.send(resp.into());
-    Ok(None)
+    Ok(())
 }

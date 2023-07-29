@@ -4,146 +4,112 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-use std::sync::{Arc, MutexGuard};
+use std::collections::HashMap;
+use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
-use atomic_refcell::{AtomicRefCell, AtomicRefMut};
+use atomic_refcell::AtomicRefCell;
+use crossbeam_channel::{Receiver, Sender};
 use log::debug;
 use lsp_types::{DocumentHighlightKind, Location, Url};
 use tree_sitter::Point;
 
 use crate::code_loc;
-use crate::parsed_file::ParsedFile;
-use crate::session_state::{Namespace, SessionState};
-use crate::types::{ClassDefinition, FunctionDefinition, ReferenceTarget, VariableDefinition};
+use crate::extractors::symbols::parent_of_kind;
+use crate::threads::db::{db_fetch_parsed_files, db_get_parsed_file};
+use crate::types::{
+    FunctionDefinition, ParsedFile, ReferenceTarget, SenderThread, ThreadMessage,
+    VariableDefinition,
+};
 
-use super::defref::parent_of_kind;
-
-pub fn find_references_to_symbol<'a>(
-    state: &'a MutexGuard<'a, &mut SessionState>,
+pub fn find_references_to_symbol(
+    sender: Sender<ThreadMessage>,
+    receiver: Receiver<ThreadMessage>,
     path: String,
     loc: Point,
     inc_dec: bool,
 ) -> Result<Vec<(Location, DocumentHighlightKind)>> {
     debug!("Listing references.");
-    let file = state.files.get(&path).ok_or(code_loc!("No such file."))?;
-    let pf_mr = file.borrow_mut();
-    for r in &pf_mr.workspace.references {
+    let file = db_get_parsed_file(&sender, &receiver, path, SenderThread::Handler)
+        .ok_or(code_loc!("No such file."))?;
+    for r in &file.workspace.references {
         let r_ref = r.borrow();
         if r_ref.loc.contains(loc) {
             let target = r_ref.target.clone();
             match &target {
-                ReferenceTarget::Class(c) => {
-                    drop(r_ref);
-                    drop(pf_mr);
-                    return find_references_to_class(state, Arc::clone(c), inc_dec);
-                }
                 ReferenceTarget::Function(f) => {
                     drop(r_ref);
-                    drop(pf_mr);
-                    return find_references_to_function(state, Arc::clone(f), inc_dec);
+                    drop(file);
+                    return find_references_to_function(
+                        sender.clone(),
+                        receiver.clone(),
+                        f.clone(),
+                        inc_dec,
+                    );
                 }
                 ReferenceTarget::Script(f) => {
                     drop(r_ref);
-                    drop(pf_mr);
-                    return find_references_to_script(state, Arc::clone(f));
+                    drop(file);
+                    return find_references_to_script(
+                        sender.clone(),
+                        receiver.clone(),
+                        f.to_owned(),
+                    );
                 }
                 ReferenceTarget::Variable(v) => {
                     drop(r_ref);
-                    return find_references_to_variable(&pf_mr, Arc::clone(v), inc_dec);
+                    return find_references_to_variable(&file, v.clone(), inc_dec);
                 }
                 ReferenceTarget::UnknownVariable => {
                     let name = r_ref.name.clone();
                     drop(r_ref);
                     if name.contains('.') {
-                        return find_references_to_field(&pf_mr, name, loc);
+                        return find_references_to_field(&file, name, loc);
                     }
                     return Ok(vec![]);
                 }
                 ReferenceTarget::Namespace(ns) => {
                     drop(r_ref);
-                    return find_references_to_namespace(&pf_mr, Arc::clone(ns));
+                    return find_references_to_namespace(&file, ns.clone());
                 }
                 _ => return Ok(vec![]),
             }
         }
     }
-    for v in &pf_mr.workspace.variables {
+    for v in &file.workspace.variables {
         if v.borrow().loc.contains(loc) {
-            return find_references_to_variable(&pf_mr, Arc::clone(v), inc_dec);
+            return find_references_to_variable(&file, v.clone(), inc_dec);
         }
     }
-    for f in pf_mr.workspace.functions.values() {
-        if f.borrow().loc.contains(loc) {
+    for f in file.workspace.functions.values() {
+        if f.loc.contains(loc) {
             let function = Arc::clone(f);
-            drop(pf_mr);
-            return find_references_to_function(state, function, inc_dec);
-        }
-    }
-    for c in pf_mr.workspace.classes.values() {
-        if c.borrow().loc.contains(loc) {
-            let class = Arc::clone(c);
-            drop(pf_mr);
-            return find_references_to_class(state, class, inc_dec);
+            return find_references_to_function(
+                sender.clone(),
+                receiver.clone(),
+                AtomicRefCell::new(function.as_ref().clone()),
+                inc_dec,
+            );
         }
     }
     Ok(vec![])
 }
 
-fn find_references_to_class<'a>(
-    state: &'a MutexGuard<'a, &mut SessionState>,
-    class: Arc<AtomicRefCell<ClassDefinition>>,
+fn find_references_to_function(
+    sender: Sender<ThreadMessage>,
+    receiver: Receiver<ThreadMessage>,
+    function: AtomicRefCell<FunctionDefinition>,
     inc_dec: bool,
 ) -> Result<Vec<(Location, DocumentHighlightKind)>> {
     let mut refs = vec![];
-    for (path, file) in &state.files {
-        let pf_ref = file.borrow();
-        let f_refs = pf_ref
-            .workspace
-            .references
-            .iter()
-            .map(|r| (path.clone(), r));
-        for (r_path, reference) in f_refs {
-            let r_ref = reference.borrow();
-            if let ReferenceTarget::Class(target) = &r_ref.target {
-                if Arc::ptr_eq(&class, target) {
-                    let path = String::from("file://") + r_path.as_str();
-                    let uri = Url::parse(path.as_str())?;
-                    let location = Location::new(uri.clone(), r_ref.loc.into());
-                    refs.push((location, DocumentHighlightKind::TEXT));
-                }
-            }
-        }
-    }
-    if inc_dec {
-        let class_ref = class.borrow();
-        let path = class_ref.parsed_file.borrow().path.clone();
-        let path = String::from("file://") + path.as_str();
-        let uri = Url::parse(path.as_str())?;
-        let loc = class_ref.loc;
-        let location = Location::new(uri.clone(), loc.into());
-        refs.push((location, DocumentHighlightKind::TEXT));
-    }
-    Ok(refs)
-}
-
-fn find_references_to_function<'a>(
-    state: &'a MutexGuard<'a, &mut SessionState>,
-    function: Arc<AtomicRefCell<FunctionDefinition>>,
-    inc_dec: bool,
-) -> Result<Vec<(Location, DocumentHighlightKind)>> {
-    let mut refs = vec![];
-    for (path, file) in &state.files {
-        let pf_ref = file.borrow();
-        let f_refs = pf_ref
-            .workspace
-            .references
-            .iter()
-            .map(|r| (path.clone(), r));
+    for (path, file) in
+        db_fetch_parsed_files(&sender, &receiver, SenderThread::Handler).unwrap_or(HashMap::new())
+    {
+        let f_refs = file.workspace.references.iter().map(|r| (path.clone(), r));
         for (r_path, reference) in f_refs {
             let r_ref = reference.borrow();
             if let ReferenceTarget::Function(target) = &r_ref.target {
-                if Arc::ptr_eq(&function, target) {
+                if function.borrow().path == target.borrow().path {
                     let path = String::from("file://") + r_path.as_str();
                     let uri = Url::parse(path.as_str())?;
                     let location = Location::new(uri.clone(), r_ref.loc.into());
@@ -154,32 +120,30 @@ fn find_references_to_function<'a>(
     }
     if inc_dec {
         let v_ref = function.borrow();
-        let path = v_ref.parsed_file.borrow().path.clone();
+        let path = v_ref.path.clone();
         let path = String::from("file://") + path.as_str();
         let uri = Url::parse(path.as_str())?;
-        let loc = v_ref.loc;
+        let loc = v_ref.signature.name_range;
         let location = Location::new(uri.clone(), loc.into());
         refs.push((location, DocumentHighlightKind::TEXT));
     }
     Ok(refs)
 }
 
-fn find_references_to_script<'a>(
-    state: &'a MutexGuard<'a, &mut SessionState>,
-    script: Arc<AtomicRefCell<ParsedFile>>,
+fn find_references_to_script(
+    sender: Sender<ThreadMessage>,
+    receiver: Receiver<ThreadMessage>,
+    script: String,
 ) -> Result<Vec<(Location, DocumentHighlightKind)>> {
     let mut refs = vec![];
-    for (path, file) in &state.files {
-        let pf_ref = file.borrow();
-        let f_refs = pf_ref
-            .workspace
-            .references
-            .iter()
-            .map(|r| (path.clone(), r));
+    for (path, file) in
+        db_fetch_parsed_files(&sender, &receiver, SenderThread::Handler).unwrap_or(HashMap::new())
+    {
+        let f_refs = file.workspace.references.iter().map(|r| (path.clone(), r));
         for (r_path, reference) in f_refs {
             let r_ref = reference.borrow();
             if let ReferenceTarget::Script(target) = &r_ref.target {
-                if Arc::ptr_eq(&script, target) {
+                if script == *target {
                     let path = String::from("file://") + r_path.as_str();
                     let uri = Url::parse(path.as_str())?;
                     let location = Location::new(uri.clone(), r_ref.loc.into());
@@ -192,8 +156,8 @@ fn find_references_to_script<'a>(
 }
 
 fn find_references_to_variable(
-    parsed_file: &AtomicRefMut<'_, ParsedFile>,
-    variable: Arc<AtomicRefCell<VariableDefinition>>,
+    parsed_file: &ParsedFile,
+    variable: AtomicRefCell<VariableDefinition>,
     inc_dec: bool,
 ) -> Result<Vec<(Location, DocumentHighlightKind)>> {
     let path = String::from("file://") + parsed_file.path.as_str();
@@ -202,7 +166,7 @@ fn find_references_to_variable(
     for r in &parsed_file.workspace.references {
         let r_ref = r.borrow();
         if let ReferenceTarget::Variable(v) = &r_ref.target {
-            if Arc::ptr_eq(&variable, v) {
+            if variable.borrow().loc == v.borrow().loc {
                 let location = Location::new(uri.clone(), r_ref.loc.into());
                 refs.push((location, DocumentHighlightKind::READ));
             }
@@ -217,8 +181,8 @@ fn find_references_to_variable(
 }
 
 fn find_references_to_namespace(
-    parsed_file: &AtomicRefMut<'_, ParsedFile>,
-    ns: Arc<AtomicRefCell<Namespace>>,
+    parsed_file: &ParsedFile,
+    ns: String,
 ) -> Result<Vec<(Location, DocumentHighlightKind)>> {
     let path = String::from("file://") + parsed_file.path.as_str();
     let uri = Url::parse(path.as_str())?;
@@ -226,7 +190,7 @@ fn find_references_to_namespace(
     for r in &parsed_file.workspace.references {
         let r_ref = r.borrow();
         if let ReferenceTarget::Namespace(v) = &r_ref.target {
-            if Arc::ptr_eq(&ns, v) {
+            if ns == *v {
                 let location = Location::new(uri.clone(), r_ref.loc.into());
                 refs.push((location, DocumentHighlightKind::TEXT));
             }
@@ -236,7 +200,7 @@ fn find_references_to_namespace(
 }
 
 fn find_references_to_field(
-    parsed_file: &AtomicRefMut<'_, ParsedFile>,
+    parsed_file: &ParsedFile,
     name: String,
     pos: Point,
 ) -> Result<Vec<(Location, DocumentHighlightKind)>> {
@@ -251,7 +215,7 @@ fn find_references_to_field(
                 let pos = r_ref.loc.start;
                 drop(r_ref);
                 if let Some(def) = base_definition(parsed_file, pos) {
-                    if Arc::ptr_eq(&base_def, &def) {
+                    if base_def.borrow().loc == def.borrow().loc {
                         let location = Location::new(uri.clone(), range.into());
                         rs.push((location, DocumentHighlightKind::WRITE));
                     }
@@ -263,26 +227,25 @@ fn find_references_to_field(
 }
 
 fn base_definition(
-    parsed_file: &AtomicRefMut<'_, ParsedFile>,
+    parsed_file: &ParsedFile,
     pos: Point,
-) -> Option<Arc<AtomicRefCell<VariableDefinition>>> {
-    if let Some(tree) = &parsed_file.tree {
-        let root = tree.root_node();
-        if let Some(node) = root.descendant_for_point_range(pos, pos) {
-            if let Some(parent) = parent_of_kind("field_expression", node) {
-                let pos = parent.start_position();
-                for r in &parsed_file.workspace.references {
-                    let r_ref = r.borrow();
-                    if r_ref.loc.contains(pos) {
-                        if let ReferenceTarget::Variable(v) = &r_ref.target {
-                            return Some(Arc::clone(v));
-                        }
+) -> Option<AtomicRefCell<VariableDefinition>> {
+    let tree = parsed_file.tree.clone();
+    let root = tree.root_node();
+    if let Some(node) = root.descendant_for_point_range(pos, pos) {
+        if let Some(parent) = parent_of_kind("field_expression", node) {
+            let pos = parent.start_position();
+            for r in &parsed_file.workspace.references {
+                let r_ref = r.borrow();
+                if r_ref.loc.contains(pos) {
+                    if let ReferenceTarget::Variable(v) = &r_ref.target {
+                        return Some(v.clone());
                     }
                 }
-                for d in &parsed_file.workspace.variables {
-                    if d.borrow().loc.contains(pos) {
-                        return Some(Arc::clone(d));
-                    }
+            }
+            for d in &parsed_file.workspace.variables {
+                if d.borrow().loc.contains(pos) {
+                    return Some(d.clone());
                 }
             }
         }

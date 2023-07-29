@@ -4,27 +4,35 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex, MutexGuard};
-
-use crate::analysis::defref;
-use crate::parsed_file::{FunctionSignature, ParsedFile};
-use crate::session_state::SessionState;
-use crate::types::Range;
-
 use anyhow::{anyhow, Context, Result};
-use atomic_refcell::{AtomicRefCell, AtomicRefMut};
-use itertools::Itertools;
-use log::debug;
-use lsp_server::Message;
+use crossbeam_channel::{Receiver, Sender};
+use lsp_server::{Message, RequestId};
 use lsp_types::notification::{Notification, Progress};
+use lsp_types::request::{Request, SemanticTokensRefresh};
 use lsp_types::{
     ProgressParams, ProgressParamsValue, WorkDoneProgress, WorkDoneProgressBegin,
     WorkDoneProgressEnd, WorkDoneProgressReport,
 };
 use tree_sitter::Node;
 
-pub type SessionStateArc = Arc<Mutex<&'static mut SessionState>>;
+use crate::threads::db::db_get_request_id;
+use crate::types::{SenderThread, ThreadMessage};
+
+pub fn request_semantic_tokens_refresh(
+    lsp_sender: &Sender<Message>,
+    sender: &Sender<ThreadMessage>,
+    receiver: &Receiver<ThreadMessage>,
+    thread: SenderThread,
+) -> Result<()> {
+    if let Some(request_id) = db_get_request_id(sender, receiver, thread) {
+        lsp_sender.send(Message::Request(lsp_server::Request {
+            id: RequestId::from(request_id),
+            method: SemanticTokensRefresh::METHOD.to_string(),
+            params: serde_json::to_value(())?,
+        }))?;
+    }
+    Ok(())
+}
 
 ////////////////////////////////////////////////////////////////////////////////
 ///                                                                          ///
@@ -58,13 +66,14 @@ macro_rules! code_loc {
     };
 }
 
-/// Locks a mutex, and adds an error message in case of error.
-pub(crate) fn lock_mutex<T>(arc: &Arc<Mutex<T>>) -> Result<MutexGuard<'_, T>> {
-    arc.lock().map_err(|_| code_loc!("Could not lock mutex."))
-}
+//////////////////////////////////////////////////////////////////////////////
+//                                                                          //
+//                          Progress Notification                           //
+//                                                                          //
+//////////////////////////////////////////////////////////////////////////////
 
 pub fn send_progress_begin<S: AsRef<str>, T: AsRef<str>>(
-    state: &mut MutexGuard<'_, &mut SessionState>,
+    lsp_sender: Sender<Message>,
     id: i32,
     title: S,
     message: T,
@@ -75,11 +84,11 @@ pub fn send_progress_begin<S: AsRef<str>, T: AsRef<str>>(
         message: Some(message.as_ref().into()),
         percentage: Some(0),
     });
-    send_notification(state, id, wd_begin)
+    send_notification(lsp_sender, id, wd_begin)
 }
 
 pub fn send_progress_report<T: AsRef<str>>(
-    state: &mut MutexGuard<'_, &mut SessionState>,
+    lsp_sender: Sender<Message>,
     id: i32,
     message: T,
     percentage: u32,
@@ -89,27 +98,26 @@ pub fn send_progress_report<T: AsRef<str>>(
         message: Some(message.as_ref().into()),
         percentage: Some(percentage),
     });
-    send_notification(state, id, wd_begin)
+    send_notification(lsp_sender, id, wd_begin)
 }
 
 pub fn send_progress_end<T: AsRef<str>>(
-    state: &mut MutexGuard<'_, &mut SessionState>,
+    lsp_sender: Sender<Message>,
     id: i32,
     message: T,
 ) -> Result<()> {
     let wd_begin = WorkDoneProgress::End(WorkDoneProgressEnd {
         message: Some(message.as_ref().into()),
     });
-    send_notification(state, id, wd_begin)
+    send_notification(lsp_sender, id, wd_begin)
 }
 
 pub fn send_notification(
-    state: &mut MutexGuard<'_, &mut SessionState>,
+    lsp_sender: Sender<Message>,
     id: i32,
     progress: WorkDoneProgress,
 ) -> Result<()> {
-    state
-        .sender
+    lsp_sender
         .send(Message::Notification(lsp_server::Notification {
             method: Progress::METHOD.to_string(),
             params: serde_json::to_value(ProgressParams {
@@ -118,201 +126,6 @@ pub fn send_notification(
             })?,
         }))
         .context(code_loc!())
-}
-
-pub fn rescan_file(
-    state: &mut MutexGuard<'_, &mut SessionState>,
-    file: Arc<AtomicRefCell<ParsedFile>>,
-) -> Result<()> {
-    debug!("Rescaning file.");
-    let mut pf_mr = file.borrow_mut();
-    if !pf_mr.open {
-        pf_mr.load_contents()?;
-    }
-    remove_references_to_file(state, &pf_mr, Arc::clone(&file))?;
-    pf_mr.parse()?;
-    let ns_path = if let Some(ns) = &pf_mr.in_namespace {
-        ns.borrow().path.clone()
-    } else {
-        "".into()
-    };
-    ParsedFile::define_type(state, Arc::clone(&file), &mut pf_mr, ns_path)?;
-    drop(pf_mr);
-    defref::analyze(state, Arc::clone(&file))?;
-    let mut pf_mr = file.borrow_mut();
-    if !pf_mr.open {
-        pf_mr.dump_contents();
-    }
-    Ok(())
-}
-
-pub fn remove_references_to_file(
-    state: &mut MutexGuard<'_, &mut SessionState>,
-    file: &AtomicRefMut<'_, ParsedFile>,
-    parsed_file: Arc<AtomicRefCell<ParsedFile>>,
-) -> Result<()> {
-    'out: for v1 in file.workspace.functions.values() {
-        for (name, v2) in &state.workspace.functions.clone() {
-            if Arc::ptr_eq(v1, v2) && Arc::ptr_eq(&v1.borrow().parsed_file, &parsed_file) {
-                state.workspace.functions.remove(name);
-                break 'out;
-            }
-        }
-    }
-    'out: for v1 in file.workspace.classes.values() {
-        for (name, v2) in &state.workspace.classes.clone() {
-            if Arc::ptr_eq(v1, v2) && Arc::ptr_eq(&v1.borrow().parsed_file, &parsed_file) {
-                state.workspace.classes.remove(name);
-                break 'out;
-            }
-        }
-    }
-    for (name, v1) in &state.workspace.scripts.clone() {
-        if Arc::ptr_eq(v1, &parsed_file) {
-            state.workspace.scripts.remove(name);
-            break;
-        }
-    }
-    Ok(())
-}
-
-pub fn function_signature(
-    parsed_file: &AtomicRefMut<'_, ParsedFile>,
-    node: Node,
-) -> Result<FunctionSignature> {
-    debug!("Scanning signature.");
-    debug!("File size: {}", parsed_file.contents.len());
-    let (name, name_range) = if let Some(name) = node.child_by_field_name("name") {
-        let name_range = name.range();
-        let name = name.utf8_text(parsed_file.contents.as_bytes())?.to_string();
-        debug!("Found name.");
-        (name, name_range)
-    } else {
-        debug!("Could not find name.");
-        return Err(anyhow!("Could not find function name"));
-    };
-    let mut sig_range: Range = node.range().into();
-    sig_range.end = name_range.end_point;
-    let mut cursor = node.walk();
-    let mut argout: usize = 0;
-    let mut vargout = false;
-    let mut argout_names = vec![];
-    if let Some(output) = node
-        .named_children(&mut cursor)
-        .find(|c| c.kind() == "function_output")
-    {
-        debug!("Function has output.");
-        if let Some(args) = output.child(0) {
-            if args.kind() == "identifier" {
-                debug!("A single one.");
-                argout = 1;
-                argout_names.push(args.utf8_text(parsed_file.contents.as_bytes())?.into());
-            } else {
-                debug!("Multiple outputs.");
-                argout = args.named_child_count();
-                let mut cursor2 = args.walk();
-                for arg_name in args
-                    .named_children(&mut cursor2)
-                    .filter(|c| c.kind() == "identifier")
-                    .filter_map(|c| c.utf8_text(parsed_file.contents.as_bytes()).ok())
-                    .map(String::from)
-                {
-                    if arg_name == "varargout" {
-                        vargout = true;
-                    } else {
-                        argout_names.push(arg_name);
-                    }
-                }
-                if vargout {
-                    argout -= 1;
-                }
-            }
-        }
-    }
-    let mut argin: usize = 0;
-    let mut vargin = false;
-    let mut argin_names = vec![];
-    let mut vargin_names = vec![];
-    if let Some(inputs) = node
-        .named_children(&mut cursor)
-        .find(|c| c.kind() == "function_arguments")
-    {
-        sig_range.end = inputs.end_position();
-        argin = inputs.named_child_count();
-        let mut cursor2 = node.walk();
-        let mut cursor3 = node.walk();
-        let mut cursor4 = node.walk();
-        for arg_name in inputs
-            .named_children(&mut cursor2)
-            .filter_map(|c| c.utf8_text(parsed_file.contents.as_bytes()).ok())
-            .map(String::from)
-        {
-            argin_names.push(arg_name);
-        }
-        let mut optional_arguments = HashMap::new();
-        for argument in node
-            .named_children(&mut cursor2)
-            .filter(|c| c.kind() == "arguments_statement")
-        {
-            if let Some(attributes) = argument
-                .named_children(&mut cursor3)
-                .find(|c| c.kind() == "attributes")
-            {
-                if attributes
-                    .named_children(&mut cursor4)
-                    .filter_map(|c| c.utf8_text(parsed_file.contents.as_bytes()).ok())
-                    .any(|c| c == "Output")
-                {
-                    continue;
-                }
-            }
-            for property in argument
-                .named_children(&mut cursor3)
-                .filter_map(|c| c.child_by_field_name("name"))
-                .filter(|c| c.kind() == "property_name")
-            {
-                let arg_name = property
-                    .named_child(0)
-                    .ok_or(anyhow!(code_loc!()))?
-                    .utf8_text(parsed_file.contents.as_bytes())?
-                    .to_string();
-                argin_names.retain(|e| *e != arg_name);
-                optional_arguments.insert(arg_name, ());
-                let opt_arg_name = property
-                    .named_child(1)
-                    .ok_or(anyhow!(code_loc!()))?
-                    .utf8_text(parsed_file.contents.as_bytes())?
-                    .to_string();
-                vargin_names.push(opt_arg_name);
-            }
-        }
-        let vargin_count = optional_arguments.keys().count();
-        vargin = vargin_count > 0;
-        argin -= vargin_count;
-    }
-    let doc: String = node
-        .named_children(&mut cursor)
-        .skip_while(|n| n.kind() != "comment")
-        .take(1)
-        .flat_map(|n| n.utf8_text(parsed_file.contents.as_bytes()))
-        .flat_map(|s| s.split('\n'))
-        .map(|s| s.trim().to_string())
-        .map(|s| s.strip_prefix('%').unwrap_or(s.as_str()).to_string())
-        .join("\n");
-    let function = FunctionSignature {
-        name_range: name_range.into(),
-        name,
-        argin,
-        argout,
-        vargin,
-        vargout,
-        argout_names,
-        argin_names,
-        vargin_names,
-        range: sig_range,
-        documentation: doc,
-    };
-    Ok(function)
 }
 
 ////////////////////////////////////////////////////////////////////////////////

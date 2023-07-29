@@ -4,6 +4,5 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-pub mod notifications;
-pub mod requests;
-pub mod responses;
+pub mod parsed_file;
+pub mod range;

@@ -4,6 +4,7 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-pub mod notifications;
-pub mod requests;
-pub mod responses;
+pub mod background_worker;
+pub mod dispatcher;
+pub mod handler;
+pub mod db;

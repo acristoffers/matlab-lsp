@@ -4,49 +4,61 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-use std::sync::MutexGuard;
+use std::collections::HashMap;
+use std::sync::Arc;
 
-use atomic_refcell::AtomicRefMut;
+use crossbeam_channel::{Receiver, Sender};
 use itertools::Itertools;
-use log::debug;
 use lsp_types::{
     CompletionItem, CompletionItemKind, InsertTextFormat, MarkupContent, MarkupKind, Position,
 };
 use tree_sitter::Point;
 
-use crate::analysis::defref::parent_of_kind;
-use crate::parsed_file::ParsedFile;
-use crate::session_state::SessionState;
-use crate::types::{PosToPoint, Range, ReferenceTarget};
+use crate::extractors::symbols::parent_of_kind;
+use crate::impls::range::PosToPoint;
+use crate::threads::db::{db_fetch_functions, db_fetch_script, db_get_package};
+use crate::types::{ParsedFile, Range, ReferenceTarget, SenderThread, ThreadMessage};
 use anyhow::Result;
 
 pub fn complete(
-    state: &MutexGuard<'_, &mut SessionState>,
-    pf_mr: &AtomicRefMut<'_, ParsedFile>,
+    sender: Sender<ThreadMessage>,
+    receiver: Receiver<ThreadMessage>,
+    pf_mr: Arc<ParsedFile>,
     pos: Position,
 ) -> Result<Vec<CompletionItem>> {
     let mut result = vec![];
     let point = pos.to_point();
-    let identifier = identifier(pf_mr, point);
-    result.extend(variable_completions(pf_mr, &identifier, point));
-    result.extend(function_completions(state, pf_mr, &identifier));
-    result.extend(namespace_completions(state, &identifier));
-    result.extend(classfolder_completions(state, &identifier));
-    result.extend(class_completions(state, &identifier));
-    result.extend(script_completions(state, &identifier));
+    let identifier = identifier(Arc::clone(&pf_mr), point);
+    result.extend(variable_completions(Arc::clone(&pf_mr), &identifier, point));
+    result.extend(function_completions(
+        sender.clone(),
+        receiver.clone(),
+        Arc::clone(&pf_mr),
+        &identifier,
+    ));
+    result.extend(namespace_completions(
+        sender.clone(),
+        receiver.clone(),
+        &identifier,
+    ));
+    result.extend(script_completions(
+        sender.clone(),
+        receiver.clone(),
+        &identifier,
+    ));
     result.extend(reference_completions(pf_mr, &identifier, point));
     result.sort_by(|a, b| a.label.cmp(&b.label));
     result.dedup_by(|a, b| a.label == b.label);
     Ok(result)
 }
 
-fn identifier(pf_mr: &AtomicRefMut<'_, ParsedFile>, pos: Point) -> String {
+fn identifier(pf_mr: Arc<ParsedFile>, pos: Point) -> String {
     let mut range = Range {
         start: pos,
         end: pos,
     };
     range.start.column = 0;
-    let line_range = range.find_bytes(pf_mr);
+    let line_range = range.find_bytes(pf_mr.as_ref());
     let line = &pf_mr.contents[line_range.start_byte..line_range.end_byte];
     let line: String = line
         .chars()
@@ -56,11 +68,7 @@ fn identifier(pf_mr: &AtomicRefMut<'_, ParsedFile>, pos: Point) -> String {
     line.chars().rev().collect()
 }
 
-fn variable_completions(
-    pf_mr: &AtomicRefMut<'_, ParsedFile>,
-    text: &str,
-    point: Point,
-) -> Vec<CompletionItem> {
+fn variable_completions(pf_mr: Arc<ParsedFile>, text: &str, point: Point) -> Vec<CompletionItem> {
     let mut completions = vec![];
     for var in &pf_mr.workspace.variables {
         let var_ref = var.borrow();
@@ -70,15 +78,14 @@ fn variable_completions(
         }
         if var_ref.name.starts_with(text) {
             let mut code = String::new();
-            if let Some(tree) = &pf_mr.tree {
-                if let Some(node) = tree
-                    .root_node()
-                    .named_descendant_for_point_range(var_ref.loc.start, var_ref.loc.start)
-                {
-                    if let Some(parent) = parent_of_kind("assignment", node) {
-                        if let Ok(text) = parent.utf8_text(pf_mr.contents.as_bytes()) {
-                            code = text.to_string();
-                        }
+            let tree = pf_mr.tree.clone();
+            if let Some(node) = tree
+                .root_node()
+                .named_descendant_for_point_range(var_ref.loc.start, var_ref.loc.start)
+            {
+                if let Some(parent) = parent_of_kind("assignment", node) {
+                    if let Ok(text) = parent.utf8_text(pf_mr.contents.as_bytes()) {
+                        code = text.to_string();
                     }
                 }
             }
@@ -104,11 +111,7 @@ fn variable_completions(
     completions
 }
 
-fn reference_completions(
-    pf_mr: &AtomicRefMut<'_, ParsedFile>,
-    text: &str,
-    point: Point,
-) -> Vec<CompletionItem> {
+fn reference_completions(pf_mr: Arc<ParsedFile>, text: &str, point: Point) -> Vec<CompletionItem> {
     let mut completions = vec![];
     for var in &pf_mr.workspace.references {
         let var = var.borrow();
@@ -138,63 +141,38 @@ fn reference_completions(
 }
 
 fn namespace_completions(
-    state: &MutexGuard<'_, &mut SessionState>,
+    sender: Sender<ThreadMessage>,
+    receiver: Receiver<ThreadMessage>,
     text: &str,
 ) -> Vec<CompletionItem> {
     let mut completions = vec![];
-    for name in state.workspace.namespaces.keys() {
-        if name.starts_with(text) {
-            let completion = CompletionItem {
-                label: name.clone(),
-                label_details: None,
-                kind: Some(CompletionItemKind::MODULE),
-                deprecated: Some(false),
-                preselect: Some(false),
-                ..CompletionItem::default()
-            };
-            completions.push(completion);
-        }
-    }
-    completions
-}
-
-fn classfolder_completions(
-    state: &MutexGuard<'_, &mut SessionState>,
-    text: &str,
-) -> Vec<CompletionItem> {
-    let mut completions = vec![];
-    for name in state.workspace.functions.keys() {
-        if name.starts_with(text) {
-            let completion = CompletionItem {
-                label: name.clone(),
-                label_details: None,
-                kind: Some(CompletionItemKind::CLASS),
-                deprecated: Some(false),
-                preselect: Some(false),
-                ..CompletionItem::default()
-            };
-            completions.push(completion);
-        }
+    for name in db_get_package(&sender, &receiver, text.to_string(), SenderThread::Handler) {
+        let completion = CompletionItem {
+            label: name.clone(),
+            label_details: None,
+            kind: Some(CompletionItemKind::MODULE),
+            deprecated: Some(false),
+            preselect: Some(false),
+            ..CompletionItem::default()
+        };
+        completions.push(completion);
     }
     completions
 }
 
 fn function_completions(
-    state: &MutexGuard<'_, &mut SessionState>,
-    pf_mr: &AtomicRefMut<'_, ParsedFile>,
+    sender: Sender<ThreadMessage>,
+    receiver: Receiver<ThreadMessage>,
+    pf_mr: Arc<ParsedFile>,
     text: &str,
 ) -> Vec<CompletionItem> {
     let mut completions = vec![];
-    debug!("{:#?}", state.workspace.functions);
-    debug!("{:#?}", pf_mr.workspace.functions);
-    let functions = state
-        .workspace
-        .functions
-        .iter()
-        .chain(pf_mr.workspace.functions.iter());
+    let functions =
+        db_fetch_functions(&sender, &receiver, SenderThread::Handler).unwrap_or(HashMap::new());
+    let functions = functions.iter().chain(pf_mr.workspace.functions.iter());
     for (name, function) in functions {
         if name.starts_with(text) {
-            let sig = &function.borrow().signature;
+            let sig = &function.signature;
             let mut fsig = "function ".to_string();
             if !sig.argout_names.is_empty() {
                 if sig.argout_names.len() == 1 {
@@ -210,7 +188,6 @@ fn function_completions(
                 kind: MarkupKind::Markdown,
                 value: format!("```matlab\n{}\n```\n---\n{}", fsig, sig.documentation),
             };
-            let function = function.borrow();
             let insert_text = format!(
                 "{}({})",
                 name,
@@ -239,33 +216,16 @@ fn function_completions(
     completions
 }
 
-fn class_completions(state: &MutexGuard<'_, &mut SessionState>, text: &str) -> Vec<CompletionItem> {
-    let mut completions = vec![];
-    for name in state.workspace.classes.keys() {
-        if name.starts_with(text) {
-            let completion = CompletionItem {
-                label: name.clone(),
-                label_details: None,
-                kind: Some(CompletionItemKind::CLASS),
-                deprecated: Some(false),
-                preselect: Some(false),
-                ..CompletionItem::default()
-            };
-            completions.push(completion);
-        }
-    }
-    completions
-}
-
 fn script_completions(
-    state: &MutexGuard<'_, &mut SessionState>,
+    sender: Sender<ThreadMessage>,
+    receiver: Receiver<ThreadMessage>,
     text: &str,
 ) -> Vec<CompletionItem> {
     let mut completions = vec![];
-    for name in state.workspace.scripts.keys() {
-        if name.starts_with(text) {
+    for pf in db_fetch_script(&sender, &receiver, SenderThread::Handler) {
+        if pf.name.starts_with(text) {
             let completion = CompletionItem {
-                label: name.clone(),
+                label: pf.name.clone(),
                 label_details: None,
                 kind: Some(CompletionItemKind::FILE),
                 deprecated: Some(false),

@@ -5,16 +5,16 @@
  */
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use crate::code_loc;
-use crate::parsed_file::ParsedFile;
-use crate::types::{PosToPoint, Range, ReferenceTarget};
+use crate::impls::range::PosToPoint;
+use crate::types::{ParsedFile, Range, ReferenceTarget};
 use anyhow::{anyhow, Result};
-use atomic_refcell::AtomicRefMut;
 use lsp_types::{SemanticToken, SemanticTokenType};
 use tree_sitter::{Node, Query, QueryCursor};
 
-pub fn semantic_tokens(parsed_file: &AtomicRefMut<'_, ParsedFile>) -> Result<Vec<SemanticToken>> {
+pub fn semantic_tokens(parsed_file: &Arc<ParsedFile>) -> Result<Vec<SemanticToken>> {
     let scm = include_str!("../queries/semantic.scm");
     let query = Query::new(tree_sitter_matlab::language(), scm)?;
     let query_captures: HashMap<u32, String> = query
@@ -23,30 +23,27 @@ pub fn semantic_tokens(parsed_file: &AtomicRefMut<'_, ParsedFile>) -> Result<Vec
         .flat_map(|n| query.capture_index_for_name(n).map(|i| (i, n.clone())))
         .collect();
     let mut cursor = QueryCursor::new();
-    if let Some(tree) = &parsed_file.tree {
-        let node = tree.root_node();
-        let captures: Vec<(String, Node)> = cursor
-            .captures(&query, node, parsed_file.contents.as_bytes())
-            .map(|(c, _)| c)
-            .flat_map(|c| c.captures)
-            .flat_map(|c| -> Result<(String, Node)> {
-                let capture_name = query_captures
-                    .get(&c.index)
-                    .ok_or(code_loc!("Not capture for index."))?
-                    .clone();
-                let node = c.node;
-                Ok((capture_name, node))
-            })
-            .collect();
-        semantic_tokens_impl(&captures, parsed_file)
-    } else {
-        Err(anyhow!("File has no tree."))
-    }
+    let tree = parsed_file.tree.clone();
+    let node = tree.root_node();
+    let captures: Vec<(String, Node)> = cursor
+        .captures(&query, node, parsed_file.contents.as_bytes())
+        .map(|(c, _)| c)
+        .flat_map(|c| c.captures)
+        .flat_map(|c| -> Result<(String, Node)> {
+            let capture_name = query_captures
+                .get(&c.index)
+                .ok_or(code_loc!("Not capture for index."))?
+                .clone();
+            let node = c.node;
+            Ok((capture_name, node))
+        })
+        .collect();
+    semantic_tokens_impl(&captures, parsed_file)
 }
 
 fn semantic_tokens_impl(
     captures: &[(String, Node)],
-    parsed_file: &AtomicRefMut<'_, ParsedFile>,
+    parsed_file: &Arc<ParsedFile>,
 ) -> Result<Vec<SemanticToken>> {
     let mut tokens = vec![];
     for (capture, node) in captures {
@@ -113,10 +110,7 @@ fn semantic_tokens_impl(
     Ok(deltalize_tokens(&tokens))
 }
 
-fn st_for_identifier(
-    node: Node,
-    parsed_file: &AtomicRefMut<'_, ParsedFile>,
-) -> Result<Option<SemanticToken>> {
+fn st_for_identifier(node: Node, parsed_file: &Arc<ParsedFile>) -> Result<Option<SemanticToken>> {
     let range: Range = node.range().into();
     let range: lsp_types::Range = range.into();
     let mut ttype = None;
@@ -130,8 +124,6 @@ fn st_for_identifier(
         let r_ref = reference.borrow();
         if r_ref.loc.contains(range.start.to_point()) {
             ttype = match &r_ref.target {
-                ReferenceTarget::Class(_) => Some(SemanticTokenType::CLASS),
-                ReferenceTarget::ClassFolder(_) => Some(SemanticTokenType::CLASS),
                 ReferenceTarget::Function(_) => Some(SemanticTokenType::FUNCTION),
                 ReferenceTarget::Namespace(_) => Some(SemanticTokenType::NAMESPACE),
                 ReferenceTarget::Script(_) => Some(SemanticTokenType::FUNCTION),

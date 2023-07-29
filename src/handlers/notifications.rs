@@ -4,73 +4,81 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-use std::path::Path;
-use std::process::ExitCode;
-use std::sync::{Arc, MutexGuard};
+use std::sync::Arc;
 
-use crate::analysis::{defref, diagnostics};
-use crate::parsed_file::{FileType, ParsedFile};
-use crate::session_state::SessionState;
-use crate::types::{Range, Workspace};
-use crate::utils::{lock_mutex, read_to_string, rescan_file, SessionStateArc};
+use crate::extractors::symbols::extract_symbols;
+use crate::threads::db::{
+    db_delete_file_function, db_delete_parsed_file, db_get_parsed_file, db_set_parsed_file,
+};
+use crate::types::{MessagePayload, ParsedFile, Range, SenderThread, ThreadMessage};
+use crate::utils::{read_to_string, request_semantic_tokens_refresh};
 
 use anyhow::{anyhow, Result};
-use atomic_refcell::AtomicRefCell;
-use itertools::Itertools;
-use log::{debug, info};
-use lsp_server::{ExtractError, Message, Notification, RequestId};
+use crossbeam_channel::{Receiver, Sender};
+use lsp_server::{ExtractError, Message, Notification};
 use lsp_types::notification::{
-    Cancel, DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument, DidSaveTextDocument,
-    Exit,
+    DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument, DidSaveTextDocument,
 };
-use lsp_types::request::{Request, SemanticTokensRefresh};
 use lsp_types::{
-    CancelParams, DidChangeTextDocumentParams, DidCloseTextDocumentParams,
-    DidOpenTextDocumentParams, DidSaveTextDocumentParams,
+    DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
+    DidSaveTextDocumentParams,
 };
 
 pub fn handle_notification(
-    state: SessionStateArc,
-    notification: &Notification,
-) -> Result<Option<ExitCode>> {
-    let mut lock = lock_mutex(&state)?;
-    let mut dispatcher = Dispatcher::new(notification);
+    lsp_sender: Sender<Message>,
+    sender: Sender<ThreadMessage>,
+    receiver: Receiver<ThreadMessage>,
+    notification: Notification,
+) -> Result<()> {
+    let mut dispatcher = Dispatcher::new(lsp_sender, sender, receiver, notification);
     dispatcher
-        .handle::<DidOpenTextDocument>(&mut lock, handle_text_document_did_open)
-        .handle::<DidCloseTextDocument>(&mut lock, handle_text_document_did_close)
-        .handle::<DidChangeTextDocument>(&mut lock, handle_text_document_did_change)
-        .handle::<DidSaveTextDocument>(&mut lock, handle_text_document_did_save)
-        .handle::<Cancel>(&mut lock, handle_cancel)
-        .handle::<Exit>(&mut lock, handle_exit)
-        .finish()
+        .handle::<DidOpenTextDocument>(handle_text_document_did_open)
+        .handle::<DidCloseTextDocument>(handle_text_document_did_close)
+        .handle::<DidChangeTextDocument>(handle_text_document_did_change)
+        .handle::<DidSaveTextDocument>(handle_text_document_did_save)
+        .finish()?;
+    Ok(())
 }
 
 struct Dispatcher {
+    lsp_sender: Sender<Message>,
+    sender: Sender<ThreadMessage>,
+    receiver: Receiver<ThreadMessage>,
     notification: Notification,
-    result: Option<Result<Option<ExitCode>>>,
+    result: Option<Result<()>>,
 }
 
-type Callback<P> = fn(&mut MutexGuard<'_, &mut SessionState>, P) -> Result<Option<ExitCode>>;
+type Callback<P> =
+    fn(Sender<Message>, Sender<ThreadMessage>, Receiver<ThreadMessage>, P) -> Result<()>;
 
 impl Dispatcher {
-    fn new(request: &Notification) -> Dispatcher {
+    fn new(
+        lsp_sender: Sender<Message>,
+        sender: Sender<ThreadMessage>,
+        receiver: Receiver<ThreadMessage>,
+        notification: Notification,
+    ) -> Dispatcher {
         Dispatcher {
-            notification: request.clone(),
+            lsp_sender,
+            sender,
+            receiver,
+            notification,
             result: None,
         }
     }
 
-    fn handle<N>(
-        &mut self,
-        state: &mut MutexGuard<'_, &mut SessionState>,
-        function: Callback<N::Params>,
-    ) -> &mut Self
+    fn handle<N>(&mut self, function: Callback<N::Params>) -> &mut Self
     where
         N: lsp_types::notification::Notification,
         N::Params: serde::de::DeserializeOwned,
     {
         let result = match cast::<N>(self.notification.clone()) {
-            Ok(params) => function(state, params),
+            Ok(params) => function(
+                self.lsp_sender.clone(),
+                self.sender.clone(),
+                self.receiver.clone(),
+                params,
+            ),
             Err(err @ ExtractError::JsonError { .. }) => Err(anyhow!("JsonError: {err:?}")),
             Err(ExtractError::MethodMismatch(req)) => Err(anyhow!("MethodMismatch: {req:?}")),
         };
@@ -80,9 +88,8 @@ impl Dispatcher {
         self
     }
 
-    fn finish(&mut self) -> Result<Option<ExitCode>> {
-        let result = self.result.take();
-        result.map_or_else(|| Ok(None), |x| x)
+    fn finish(&mut self) -> Result<()> {
+        self.result.take().unwrap_or(Ok(()))
     }
 }
 
@@ -95,205 +102,129 @@ where
 }
 
 fn handle_text_document_did_open(
-    state: &mut MutexGuard<'_, &mut SessionState>,
+    lsp_sender: Sender<Message>,
+    sender: Sender<ThreadMessage>,
+    receiver: Receiver<ThreadMessage>,
     params: DidOpenTextDocumentParams,
-) -> Result<Option<ExitCode>> {
-    info!(
-        "documentText/didOpen: {}",
-        params.text_document.uri.as_str()
-    );
-    let contents = read_to_string(&mut params.text_document.text.as_bytes(), None)?.0;
+) -> Result<()> {
     let path = params.text_document.uri.path().to_string();
-    if let Some(file) = state.files.get(&path) {
-        let mut pf_mr = file.borrow_mut();
-        pf_mr.open = true;
-        pf_mr.contents = contents;
-        drop(pf_mr);
-        let file = Arc::clone(file);
-        rescan_file(state, file)?;
-        return Ok(None);
-    }
-    let path_p = Path::new(&path);
-    let mut scope = String::new();
-    for segment in path_p.iter() {
-        let segment = segment.to_string_lossy().to_string();
-        if segment.starts_with('+') || segment.starts_with('@') {
-            if !scope.is_empty() {
-                scope += "/";
-            }
-            scope += segment.as_str();
-        }
-    }
-    let file_name: String = if let Some(segs) = params.text_document.uri.path_segments() {
-        if let Some(name) = segs
-            .filter(|c| !c.is_empty())
-            .flat_map(|c| c.strip_suffix(".m"))
-            .last()
-        {
-            name.into()
-        } else {
-            "".into()
-        }
-    } else {
-        "".into()
-    };
-    let mut parsed_file = ParsedFile {
-        contents,
-        path: params.text_document.uri.path().to_string(),
-        name: file_name.clone(),
-        file_type: FileType::MScript,
-        in_classfolder: None,
-        in_namespace: None,
-        open: true,
-        tree: None,
-        workspace: Workspace::default(),
-    };
-    let key = parsed_file.path.clone();
-    parsed_file.parse()?;
-    let parsed_file = Arc::new(AtomicRefCell::new(parsed_file));
-    let namespace = if let Some(segments) = params.text_document.uri.path_segments() {
-        segments
-            .map(|s| s.to_string())
-            .flat_map(|s| s.strip_prefix(|f| f == '+' || f == '@').map(String::from))
-            .join(".")
-    } else {
-        "".to_string()
-    };
-    defref::analyze(state, Arc::clone(&parsed_file))?;
-    let mut pf_mr = parsed_file.borrow_mut();
-    diagnostics::diagnotiscs(state, &pf_mr)?;
-    state.files.insert(key.clone(), Arc::clone(&parsed_file));
-    ParsedFile::define_type(state, Arc::clone(&parsed_file), &mut pf_mr, namespace)?;
-    debug!("Inserted {key} into the store");
-    state.sender.send(Message::Request(lsp_server::Request {
-        id: RequestId::from(state.request_id),
-        method: SemanticTokensRefresh::METHOD.to_string(),
-        params: serde_json::to_value(())?,
-    }))?;
-    state.rescan_open_files = true;
-    state.request_id += 1;
-    Ok(None)
+    let contents = read_to_string(&mut params.text_document.text.as_bytes(), None)?.0;
+    let mut file = ParsedFile::new(path.clone(), Some(contents))?;
+    file.open = true;
+    let file = extract_symbols(
+        sender.clone(),
+        receiver.clone(),
+        SenderThread::Handler,
+        Arc::new(file),
+    )?;
+    db_set_parsed_file(&sender, file, SenderThread::Handler)?;
+    request_semantic_tokens_refresh(&lsp_sender, &sender, &receiver, SenderThread::Handler)?;
+    Ok(())
 }
 
 fn handle_text_document_did_close(
-    state: &mut MutexGuard<'_, &mut SessionState>,
+    _lsp_sender: Sender<Message>,
+    sender: Sender<ThreadMessage>,
+    receiver: Receiver<ThreadMessage>,
     params: DidCloseTextDocumentParams,
-) -> Result<Option<ExitCode>> {
-    info!(
-        "documentText/didClose: {}",
-        params.text_document.uri.as_str()
-    );
-    let path = params.text_document.uri.path();
-    if params.text_document.uri.scheme() == "file" && std::path::Path::new(path).exists() {
-        if let Some(file) = state.files.get(&path.to_string()) {
-            let mut pf_mr = file.borrow_mut();
-            pf_mr.open = false;
-            drop(pf_mr);
-            let file = Arc::clone(file);
-            rescan_file(state, file)?;
-            state.rescan_all_files = state.files.iter().any(|(_, f)| f.borrow().open);
-        }
+) -> Result<()> {
+    let path = params.text_document.uri.path().to_string();
+    if let Ok(file) = ParsedFile::new(path.clone(), None) {
+        let file = extract_symbols(
+            sender.clone(),
+            receiver.clone(),
+            SenderThread::Handler,
+            Arc::new(file),
+        )?;
+        let mut file = file.as_ref().clone();
+        file.open = false;
+        file.dump_contents();
+        db_set_parsed_file(&sender, Arc::new(file), SenderThread::Handler)?;
     } else {
-        state.files.remove(params.text_document.uri.as_str());
+        db_delete_parsed_file(&sender, path.clone(), SenderThread::Handler)?;
+        db_delete_file_function(&sender, path, SenderThread::Handler)?;
     }
-    Ok(None)
+    sender.send(ThreadMessage {
+        sender: SenderThread::Handler,
+        payload: MessagePayload::ScanWorkspace(vec![]),
+    })?;
+    Ok(())
 }
 
 fn handle_text_document_did_change(
-    state: &mut MutexGuard<'_, &mut SessionState>,
+    lsp_sender: Sender<Message>,
+    sender: Sender<ThreadMessage>,
+    receiver: Receiver<ThreadMessage>,
     params: DidChangeTextDocumentParams,
-) -> Result<Option<ExitCode>> {
-    info!(
-        "documentText/didChange: {}",
-        params.text_document.uri.as_str(),
-    );
-    let file_path = params.text_document.uri.path().to_string();
-    let parsed_file = state
-        .files
-        .get(&file_path)
-        .ok_or(anyhow!("No such file: {file_path}"))?
-        .clone();
+) -> Result<()> {
+    let path = params.text_document.uri.path().to_string();
+    let mut file =
+        if let Some(file) = db_get_parsed_file(&sender, &receiver, path, SenderThread::Handler) {
+            file.as_ref().clone()
+        } else {
+            return Ok(());
+        };
     for change in params.content_changes {
-        debug!(
-            "Appying change with range {} and contents {}",
-            serde_json::to_string(&change.range)?,
-            change.text
-        );
         match change.range {
             Some(range) => {
                 let range: Range = range.into();
-                let mut pf_mr = parsed_file.borrow_mut();
-                let ts_range = range.find_bytes(&pf_mr);
+                let ts_range = range.find_bytes(&file);
                 let (start, mut end) = (ts_range.start_byte, ts_range.end_byte);
-                end = end.min(pf_mr.contents.len().saturating_sub(1));
+                end = end.min(file.contents.len().saturating_sub(1));
                 if start >= end {
-                    pf_mr.contents.insert_str(start, change.text.as_str());
+                    file.contents.insert_str(start, change.text.as_str());
                 } else {
-                    debug!("Replacing from {start} to {end} with {}", change.text);
-                    pf_mr
-                        .contents
+                    file.contents
                         .replace_range(start..end, change.text.as_str());
                 }
             }
-            None => parsed_file.borrow_mut().contents = change.text,
+            None => file.contents = change.text,
         }
     }
-    rescan_file(state, parsed_file)?;
-    state.sender.send(Message::Request(lsp_server::Request {
-        id: RequestId::from(state.request_id),
-        method: SemanticTokensRefresh::METHOD.to_string(),
-        params: serde_json::to_value(())?,
-    }))?;
-    state.request_id += 1;
-    state.rescan_open_files = true;
-    Ok(None)
+    file.tree = ParsedFile::ts_parse(&file.contents)?;
+    let file = extract_symbols(
+        sender.clone(),
+        receiver.clone(),
+        SenderThread::Handler,
+        Arc::new(file),
+    )?;
+    db_set_parsed_file(&sender, file, SenderThread::Handler)?;
+    sender.send(ThreadMessage {
+        sender: SenderThread::Handler,
+        payload: crate::types::MessagePayload::ScanOpen,
+    })?;
+    request_semantic_tokens_refresh(&lsp_sender, &sender, &receiver, SenderThread::Handler)?;
+    Ok(())
 }
 
 fn handle_text_document_did_save(
-    state: &mut MutexGuard<'_, &mut SessionState>,
+    lsp_sender: Sender<Message>,
+    sender: Sender<ThreadMessage>,
+    receiver: Receiver<ThreadMessage>,
     params: DidSaveTextDocumentParams,
-) -> Result<Option<ExitCode>> {
-    info!(
-        "documentText/didSave: {}",
-        params.text_document.uri.as_str(),
-    );
-    let file_path = params.text_document.uri.path().to_string();
-    let parsed_file = state
-        .files
-        .get(&file_path)
-        .ok_or(anyhow!("No such file: {file_path}"))?
-        .clone();
+) -> Result<()> {
+    let path = params.text_document.uri.path().to_string();
+    let mut file =
+        if let Some(file) = db_get_parsed_file(&sender, &receiver, path, SenderThread::Handler) {
+            file.as_ref().clone()
+        } else {
+            return Ok(());
+        };
     if let Some(content) = params.text {
-        let mut pf_mr = parsed_file.borrow_mut();
-        pf_mr.contents = content;
-        drop(pf_mr);
-        rescan_file(state, parsed_file)?;
+        file.contents = content;
     }
-    state.sender.send(Message::Request(lsp_server::Request {
-        id: RequestId::from(state.request_id),
-        method: SemanticTokensRefresh::METHOD.to_string(),
-        params: serde_json::to_value(())?,
-    }))?;
-    state.request_id += 1;
-    state.rescan_all_files = true;
-    Ok(None)
-}
-
-fn handle_cancel(
-    _: &mut MutexGuard<'_, &mut SessionState>,
-    _: CancelParams,
-) -> Result<Option<ExitCode>> {
-    // Cancelation is not supported, this is here to silence the logger.
-    Ok(None)
-}
-
-fn handle_exit(
-    state: &mut MutexGuard<'_, &mut SessionState>,
-    _params: (),
-) -> Result<Option<ExitCode>> {
-    info!("Got Exit notification.");
-    if !state.client_requested_shutdown {
-        return Ok(Some(ExitCode::from(1)));
-    }
-    Ok(Some(ExitCode::SUCCESS))
+    file.tree = ParsedFile::ts_parse(&file.contents)?;
+    let file = extract_symbols(
+        sender.clone(),
+        receiver.clone(),
+        SenderThread::Handler,
+        Arc::new(file),
+    )?;
+    db_set_parsed_file(&sender, file, SenderThread::Handler)?;
+    sender.send(ThreadMessage {
+        sender: SenderThread::Handler,
+        payload: MessagePayload::ScanWorkspace(vec![]),
+    })?;
+    request_semantic_tokens_refresh(&lsp_sender, &sender, &receiver, SenderThread::Handler)?;
+    Ok(())
 }
