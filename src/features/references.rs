@@ -87,7 +87,7 @@ pub fn find_references_to_symbol(
             return find_references_to_function(
                 sender.clone(),
                 receiver.clone(),
-                AtomicRefCell::new(function.as_ref().clone()),
+                Arc::new(AtomicRefCell::new(function.as_ref().clone())),
                 inc_dec,
             );
         }
@@ -98,7 +98,7 @@ pub fn find_references_to_symbol(
 fn find_references_to_function(
     sender: Sender<ThreadMessage>,
     receiver: Receiver<ThreadMessage>,
-    function: AtomicRefCell<FunctionDefinition>,
+    function: Arc<AtomicRefCell<FunctionDefinition>>,
     inc_dec: bool,
 ) -> Result<Vec<(Location, DocumentHighlightKind)>> {
     let mut refs = vec![];
@@ -157,7 +157,7 @@ fn find_references_to_script(
 
 fn find_references_to_variable(
     parsed_file: &ParsedFile,
-    variable: AtomicRefCell<VariableDefinition>,
+    variable: Arc<AtomicRefCell<VariableDefinition>>,
     inc_dec: bool,
 ) -> Result<Vec<(Location, DocumentHighlightKind)>> {
     let path = String::from("file://") + parsed_file.path.as_str();
@@ -229,7 +229,7 @@ fn find_references_to_field(
 fn base_definition(
     parsed_file: &ParsedFile,
     pos: Point,
-) -> Option<AtomicRefCell<VariableDefinition>> {
+) -> Option<Arc<AtomicRefCell<VariableDefinition>>> {
     let tree = parsed_file.tree.clone();
     let root = tree.root_node();
     if let Some(node) = root.descendant_for_point_range(pos, pos) {

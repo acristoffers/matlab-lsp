@@ -59,7 +59,7 @@ pub fn hover_for_symbol(
 
 fn hover_variable(
     parsed_file: &Arc<ParsedFile>,
-    variable: AtomicRefCell<VariableDefinition>,
+    variable: Arc<AtomicRefCell<VariableDefinition>>,
 ) -> Result<Option<(MarkupContent, MarkupContent)>> {
     debug!("Hovering a variable.");
     let vd_ref = variable.borrow();
@@ -104,7 +104,7 @@ fn hover_variable(
 }
 
 fn hover_function(
-    function: AtomicRefCell<FunctionDefinition>,
+    function: Arc<AtomicRefCell<FunctionDefinition>>,
 ) -> Result<Option<(MarkupContent, MarkupContent)>> {
     debug!("Hovering a function.");
     let sig = &function.borrow().signature;

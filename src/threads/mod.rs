@@ -5,6 +5,6 @@
  */
 
 pub mod background_worker;
+pub mod db;
 pub mod dispatcher;
 pub mod handler;
-pub mod db;

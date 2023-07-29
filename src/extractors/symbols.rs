@@ -232,7 +232,7 @@ fn analyze_impl(
                         }
                     }
                     if let Some(v) = vs.first() {
-                        let vref = AtomicRefCell::new(v.clone());
+                        let vref = Arc::new(AtomicRefCell::new(v.clone()));
                         workspace.references.push(vref);
                     } else {
                         let vref = Reference {
@@ -240,7 +240,7 @@ fn analyze_impl(
                             name,
                             target: ReferenceTarget::UnknownVariable,
                         };
-                        let vref = AtomicRefCell::new(vref);
+                        let vref = Arc::new(AtomicRefCell::new(vref));
                         workspace.references.push(vref);
                     }
                 } else {
@@ -448,7 +448,7 @@ fn command_capture_impl(
                     name: name.clone(),
                     target: ReferenceTarget::Script(ms.path.clone()),
                 };
-                let r = AtomicRefCell::new(r);
+                let r = Arc::new(AtomicRefCell::new(r));
                 workspace.references.push(r);
             } else {
                 debug!("Not a script.");
@@ -464,7 +464,7 @@ fn command_capture_impl(
                     false,
                 )?;
                 if let Some(fref) = fs.first() {
-                    let fref = AtomicRefCell::new(fref.clone());
+                    let fref = Arc::new(AtomicRefCell::new(fref.clone()));
                     workspace.references.push(fref);
                 }
             }
@@ -512,7 +512,7 @@ fn fncall_capture_impl(
                     parsed_file,
                 )?;
                 if let Some(v) = vs.first() {
-                    let v = AtomicRefCell::new(v.clone());
+                    let v = Arc::new(AtomicRefCell::new(v.clone()));
                     workspace.references.push(v);
                     return Ok(());
                 }
@@ -528,7 +528,7 @@ fn fncall_capture_impl(
                     false,
                 )?;
                 if let Some(fref) = fs.first() {
-                    let fref = AtomicRefCell::new(fref.clone());
+                    let fref = Arc::new(AtomicRefCell::new(fref.clone()));
                     workspace.references.push(fref);
                 } else {
                     let right_def = if let Some(parent) = parent_of_kind("assignment", *node) {
@@ -546,7 +546,7 @@ fn fncall_capture_impl(
                             name: fname.clone(),
                             target: ReferenceTarget::UnknownFunction,
                         };
-                        let fref = AtomicRefCell::new(r);
+                        let fref = Arc::new(AtomicRefCell::new(r));
                         workspace.references.push(fref);
                     }
                 }
@@ -644,7 +644,7 @@ fn field_capture_impl(
                             false,
                         )?;
                         if let Some(v) = vs.iter().chain(fs.iter()).next() {
-                            let r = AtomicRefCell::new(v.clone());
+                            let r = Arc::new(AtomicRefCell::new(v.clone()));
                             workspace.references.push(r);
                         }
                         if is_def {
@@ -712,7 +712,7 @@ fn field_capture_impl(
                     parsed_file,
                 )?;
                 if let Some(v) = vref.first() {
-                    let r = AtomicRefCell::new(v.clone());
+                    let r = Arc::new(AtomicRefCell::new(v.clone()));
                     workspace.references.push(r);
                     continue;
                 } else if i > 0 {
@@ -721,7 +721,7 @@ fn field_capture_impl(
                         name: path.clone(),
                         target: ReferenceTarget::UnknownVariable,
                     };
-                    let reference = AtomicRefCell::new(reference);
+                    let reference = Arc::new(AtomicRefCell::new(reference));
                     workspace.references.push(reference);
                 }
                 if i == 0 || i == fields.len().saturating_sub(1) {
@@ -762,13 +762,14 @@ fn field_capture_impl(
                                     thread.clone(),
                                 ) {
                                     debug!("Got function for {path}.");
-                                    let f_def = AtomicRefCell::new(f_def.as_ref().clone());
+                                    let f_def =
+                                        Arc::new(AtomicRefCell::new(f_def.as_ref().clone()));
                                     let vref = Reference {
                                         loc: field.range().into(),
                                         name: path,
                                         target: ReferenceTarget::Function(f_def),
                                     };
-                                    let vref = AtomicRefCell::new(vref);
+                                    let vref = Arc::new(AtomicRefCell::new(vref));
                                     workspace.references.push(vref);
                                 } else {
                                     debug!("Unknown function for path {path}");
@@ -777,7 +778,7 @@ fn field_capture_impl(
                                         name: path,
                                         target: ReferenceTarget::UnknownFunction,
                                     };
-                                    let vref = AtomicRefCell::new(vref);
+                                    let vref = Arc::new(AtomicRefCell::new(vref));
                                     workspace.references.push(vref);
                                     return Ok(());
                                 }
@@ -792,7 +793,7 @@ fn field_capture_impl(
                                         name: path,
                                         target: ReferenceTarget::Namespace(ws.clone()),
                                     };
-                                    let vref = AtomicRefCell::new(vref);
+                                    let vref = Arc::new(AtomicRefCell::new(vref));
                                     workspace.references.push(vref);
                                     current_ns = Some(ws.clone());
                                 } else {
@@ -802,7 +803,7 @@ fn field_capture_impl(
                                         name: path,
                                         target: ReferenceTarget::UnknownVariable,
                                     };
-                                    let vref = AtomicRefCell::new(vref);
+                                    let vref = Arc::new(AtomicRefCell::new(vref));
                                     workspace.references.push(vref);
                                     return Ok(());
                                 }
@@ -821,7 +822,7 @@ fn field_capture_impl(
                             name: path,
                             target: ReferenceTarget::Namespace(ns.clone()),
                         };
-                        let vref = AtomicRefCell::new(vref);
+                        let vref = Arc::new(AtomicRefCell::new(vref));
                         workspace.references.push(vref);
                         current_ns = Some(ns.clone());
                     } else {
@@ -841,7 +842,7 @@ fn field_capture_impl(
                         parsed_file,
                     )?;
                     if let Some(v) = vs.first() {
-                        let v = AtomicRefCell::new(v.clone());
+                        let v = Arc::new(AtomicRefCell::new(v.clone()));
                         workspace.references.push(v);
                     } else {
                         debug!("Could not find definition for {path}.");
@@ -850,7 +851,7 @@ fn field_capture_impl(
                             name: path.clone(),
                             target: ReferenceTarget::UnknownVariable,
                         };
-                        let vref = AtomicRefCell::new(vref);
+                        let vref = Arc::new(AtomicRefCell::new(vref));
                         workspace.references.push(vref);
                     }
                 }
@@ -955,7 +956,9 @@ fn ref_to_fn_in_ws(
             let f_ref = Reference {
                 loc: node.range().into(),
                 name: name.clone(),
-                target: ReferenceTarget::Function(AtomicRefCell::new(fn_def.as_ref().clone())),
+                target: ReferenceTarget::Function(Arc::new(AtomicRefCell::new(
+                    fn_def.as_ref().clone(),
+                ))),
             };
             references.push(f_ref);
         }
@@ -982,7 +985,9 @@ fn ref_to_fn(
                 let r = Reference {
                     loc: node.range().into(),
                     name: name.clone(),
-                    target: ReferenceTarget::Function(AtomicRefCell::new(f.as_ref().clone())),
+                    target: ReferenceTarget::Function(Arc::new(AtomicRefCell::new(
+                        f.as_ref().clone(),
+                    ))),
                 };
                 references.push(r);
             }
@@ -993,7 +998,7 @@ fn ref_to_fn(
             let r = Reference {
                 loc: node.range().into(),
                 name: name.clone(),
-                target: ReferenceTarget::Function(AtomicRefCell::new(f.as_ref().clone())),
+                target: ReferenceTarget::Function(Arc::new(AtomicRefCell::new(f.as_ref().clone()))),
             };
             references.push(r);
         }
@@ -1042,7 +1047,7 @@ fn def_var(
                                     name,
                                     target: ReferenceTarget::Variable(var.clone()),
                                 };
-                                let referece = AtomicRefCell::new(reference);
+                                let referece = Arc::new(AtomicRefCell::new(reference));
                                 workspace.references.push(referece);
                                 return Ok(());
                             }
@@ -1064,7 +1069,7 @@ fn def_var(
         return Ok(());
     }
     if soft_scope_parent(node).is_some() && !vref.is_empty() {
-        let vref = AtomicRefCell::new(vref.first().unwrap().clone());
+        let vref = Arc::new(AtomicRefCell::new(vref.first().unwrap().clone()));
         workspace.references.push(vref);
     } else {
         let is_global = parent_of_kind("global_operator", node).is_some();
@@ -1077,7 +1082,7 @@ fn def_var(
             is_parameter,
             is_global,
         };
-        let definition = AtomicRefCell::new(definition);
+        let definition = Arc::new(AtomicRefCell::new(definition));
         if let Some(scope) = scopes.first() {
             if let Some((_, ws)) = functions.get_mut(scope) {
                 ws.variables.push(definition);

@@ -201,8 +201,8 @@ pub enum ReferenceTarget {
     UnknownFunction,
     Namespace(String),
     Script(String),
-    Function(AtomicRefCell<FunctionDefinition>),
-    Variable(AtomicRefCell<VariableDefinition>),
+    Function(Arc<AtomicRefCell<FunctionDefinition>>),
+    Variable(Arc<AtomicRefCell<VariableDefinition>>),
 }
 
 #[derive(Debug, Clone, Default)]
@@ -219,9 +219,9 @@ pub struct Workspace {
     /// Packages
     pub packages: Vec<String>,
     /// Reference
-    pub references: Vec<AtomicRefCell<Reference>>,
+    pub references: Vec<Arc<AtomicRefCell<Reference>>>,
     /// Variables
-    pub variables: Vec<AtomicRefCell<VariableDefinition>>,
+    pub variables: Vec<Arc<AtomicRefCell<VariableDefinition>>>,
 }
 
 //////////////////////////////////////////////////////////////////////////////

@@ -27,11 +27,11 @@ use log::{debug, error, info};
 use lsp_server::{Connection, Message};
 use lsp_types::notification::{Exit, Notification};
 use lsp_types::{
-    FoldingRangeProviderCapability, HoverProviderCapability, InitializeParams, OneOf,
-    PositionEncodingKind, SaveOptions, SemanticTokenType, SemanticTokensFullOptions,
+    CompletionOptions, FoldingRangeProviderCapability, HoverProviderCapability, InitializeParams,
+    OneOf, PositionEncodingKind, SaveOptions, SemanticTokenType, SemanticTokensFullOptions,
     SemanticTokensLegend, SemanticTokensOptions, SemanticTokensServerCapabilities,
     ServerCapabilities, TextDocumentSyncCapability, TextDocumentSyncKind, TextDocumentSyncOptions,
-    WorkDoneProgressOptions, CompletionOptions,
+    WorkDoneProgressOptions,
 };
 use process_alive::Pid;
 use simplelog::{CombinedLogger, Config, WriteLogger};
