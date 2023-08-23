@@ -374,7 +374,7 @@ dependencies = [
 [[package]]
 name = "matlab_beautifier"
 version = "1.0.0"
-source = "git+https://github.com/acristoffers/matlab-beautifier#bd6222486c32117748865bf72d6bc482084ec851"
+source = "git+https://github.com/acristoffers/matlab-beautifier#9ede9e9f9296d9b798c5acd8b1aa72fc8beaa42d"
 dependencies = [
  "anyhow",
  "cc",
