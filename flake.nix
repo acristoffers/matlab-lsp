@@ -26,6 +26,10 @@
         formatter = nixpkgs.legacyPackages.${system}.nixpkgs-fmt;
         packages.matlab-lsp = mkPackage { name = "matlab-lsp"; };
         packages.default = packages.matlab-lsp;
+        apps = rec {
+          matlab-lsp = { type = "app"; program = "${packages.default}/bin/matlab-lsp"; };
+          default = matlab-lsp;
+        };
         devShell = pkgs.mkShell {
           nativeBuildInputs = with pkgs; [ rustc cargo ];
           inherit buildInputs;
