@@ -1,8 +1,11 @@
 {
   inputs = {
-    flake-utils.url = "github:numtide/flake-utils";
-    naersk.url = "github:nix-community/naersk";
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
+
+    flake-utils.url = "github:numtide/flake-utils";
+
+    naersk.url = "github:nix-community/naersk";
+    naersk.inputs.nixpkgs.follows = "nixpkgs";
   };
   outputs = { self, flake-utils, naersk, nixpkgs }:
     flake-utils.lib.eachDefaultSystem (system:
@@ -15,7 +18,7 @@
           inherit buildInputs;
           inherit name;
           inherit version;
-          nativeBuildInputs = with pkgs;[ cmake pkg-config ];
+          nativeBuildInputs = with pkgs; [ cmake pkg-config ];
           src = ./.;
           postInstall = "
             cp -r target/release/share $out/share
@@ -23,7 +26,7 @@
         };
       in
       rec {
-        formatter = nixpkgs.legacyPackages.${system}.nixpkgs-fmt;
+        formatter = pkgs.nixpkgs-fmt;
         packages.matlab-lsp = mkPackage { name = "matlab-lsp"; };
         packages.default = packages.matlab-lsp;
         apps = rec {
