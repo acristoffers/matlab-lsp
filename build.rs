@@ -12,12 +12,12 @@ use std::path::{Path, PathBuf};
 include!("src/args.rs");
 
 fn get_output_path() -> PathBuf {
-    //<root or manifest path>/target/<profile>/
-    let manifest_dir_string = env::var("CARGO_MANIFEST_DIR").unwrap();
+    let out_dir = env::var("OUT_DIR").unwrap();
     let build_type = env::var("PROFILE").unwrap();
-    Path::new(&manifest_dir_string)
-        .join("target")
-        .join(build_type)
+    let target = out_dir
+        .split_at(out_dir.find(build_type.as_str()).unwrap())
+        .0;
+    Path::new(&target).join(build_type)
 }
 
 fn main() -> Result<(), Error> {
