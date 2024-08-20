@@ -13,7 +13,6 @@ use lsp_types::{
     ProgressParams, ProgressParamsValue, WorkDoneProgress, WorkDoneProgressBegin,
     WorkDoneProgressEnd, WorkDoneProgressReport,
 };
-use tree_sitter::Node;
 
 use crate::threads::db::db_get_request_id;
 use crate::types::{SenderThread, ThreadMessage};
@@ -32,28 +31,6 @@ pub fn request_semantic_tokens_refresh(
         }))?;
     }
     Ok(())
-}
-
-////////////////////////////////////////////////////////////////////////////////
-///                                                                          ///
-///                          Better Error Handling                           ///
-///                                                                          ///
-////////////////////////////////////////////////////////////////////////////////
-
-pub trait TraversingError<T> {
-    fn err_at_loc(self, node: &Node) -> Result<T>;
-}
-
-impl<T> TraversingError<T> for Option<T> {
-    fn err_at_loc(self, node: &Node) -> Result<T> {
-        self.ok_or_else(|| {
-            anyhow!(
-                "Error accessing token around line {} col {}",
-                node.range().start_point.row,
-                node.range().start_point.column
-            )
-        })
-    }
 }
 
 #[macro_export]

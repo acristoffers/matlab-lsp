@@ -4,7 +4,6 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-pub use clap::CommandFactory;
 pub use clap::Parser;
 
 static LONG_ABOUT: &str = "

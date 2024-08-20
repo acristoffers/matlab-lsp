@@ -37,11 +37,11 @@ pub fn extract_symbols(
         pf_mr.load_contents()?;
     }
     let scm = include_str!("../queries/defref.scm");
-    let query = Query::new(tree_sitter_matlab::language(), scm)?;
+    let query = Query::new(&tree_sitter_matlab::language(), scm)?;
     let query_captures: HashMap<u32, String> = query
         .capture_names()
         .iter()
-        .flat_map(|n| query.capture_index_for_name(n).map(|i| (i, n.clone())))
+        .flat_map(|n| query.capture_index_for_name(n).map(|i| (i, n.to_string())))
         .collect();
     let mut cursor = QueryCursor::new();
     let tree = pf_mr.tree.clone();

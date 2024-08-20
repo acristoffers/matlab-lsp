@@ -4,6 +4,7 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
+use clap::CommandFactory;
 use clap_complete::{generate_to, shells};
 use std::env;
 use std::io::Error;

@@ -44,7 +44,7 @@ impl ParsedFile {
     pub fn ts_parse(contents: &String) -> Result<Tree> {
         let mut parser = tree_sitter::Parser::new();
         parser
-            .set_language(tree_sitter_matlab::language())
+            .set_language(&tree_sitter_matlab::language())
             .with_context(|| "Could not set Tree-Sitter language")?;
         parser
             .parse(contents, None)

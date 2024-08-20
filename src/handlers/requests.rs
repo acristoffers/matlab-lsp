@@ -378,7 +378,7 @@ fn handle_folding(
         let tree = file.tree.clone();
         let root = tree.root_node();
         let scm = "(block) @block";
-        let query = Query::new(tree_sitter_matlab::language(), scm)?;
+        let query = Query::new(&tree_sitter_matlab::language(), scm)?;
         let mut cursor = QueryCursor::new();
         let mut resp = vec![];
         for node in cursor

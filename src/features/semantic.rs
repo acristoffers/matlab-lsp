@@ -16,11 +16,11 @@ use tree_sitter::{Node, Query, QueryCursor};
 
 pub fn semantic_tokens(parsed_file: &Arc<ParsedFile>) -> Result<Vec<SemanticToken>> {
     let scm = include_str!("../queries/semantic.scm");
-    let query = Query::new(tree_sitter_matlab::language(), scm)?;
+    let query = Query::new(&tree_sitter_matlab::language(), scm)?;
     let query_captures: HashMap<u32, String> = query
         .capture_names()
         .iter()
-        .flat_map(|n| query.capture_index_for_name(n).map(|i| (i, n.clone())))
+        .flat_map(|n| query.capture_index_for_name(n).map(|i| (i, n.to_string())))
         .collect();
     let mut cursor = QueryCursor::new();
     let tree = parsed_file.tree.clone();
