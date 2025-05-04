@@ -29,7 +29,7 @@ use lsp_types::{
     RenameParams, SemanticTokens, SemanticTokensParams, TextEdit, Url, WorkspaceEdit,
 };
 use regex::Regex;
-use tree_sitter::{Point, Query, QueryCursor};
+use tree_sitter::{Node, Point, Query, QueryCursor, StreamingIterator};
 
 pub fn handle_request(
     lsp_sender: Sender<Message>,
@@ -378,15 +378,17 @@ fn handle_folding(
         let tree = file.tree.clone();
         let root = tree.root_node();
         let scm = "(block) @block";
-        let query = Query::new(&tree_sitter_matlab::language(), scm)?;
+        let query = Query::new(&tree_sitter_matlab::LANGUAGE.into(), scm)?;
         let mut cursor = QueryCursor::new();
         let mut resp = vec![];
-        for node in cursor
-            .captures(&query, root, file.contents.as_bytes())
-            .map(|(c, _)| c)
-            .flat_map(|c| c.captures)
-            .map(|c| c.node)
-        {
+        let mut xs = cursor.captures(&query, root, file.contents.as_bytes());
+        let mut nodes: Vec<Node> = vec![];
+        while let Some((c, _)) = xs.next() {
+            for c in c.captures {
+                nodes.push(c.node);
+            }
+        }
+        for node in nodes {
             let fold = FoldingRange {
                 start_line: node.start_position().to_position().line,
                 start_character: None,

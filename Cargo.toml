@@ -4,30 +4,31 @@ version = "0.0.1"
 edition = "2021"
 
 [dependencies]
-anyhow = "1.0.89"
+anyhow = "1.0.98"
 atomic_refcell = "0.1.13"
 chardetng = "0.1.17"
-clap = { version = "4.5.18", features = ["derive", "env"] }
-crossbeam-channel = "0.5.13"
-encoding_rs = "0.8.34"
-itertools = "0.11.0"
-log = { version = "0.4.22", features = ["max_level_debug", "release_max_level_warn"] }
-lsp-server = "0.7.7"
+clap = { version = "4.5.37", features = ["derive", "env"] }
+crossbeam-channel = "0.5.15"
+encoding_rs = "0.8.35"
+itertools = "0.14.0"
+log = { version = "0.4.27", features = ["max_level_debug", "release_max_level_warn"] }
+lsp-server = "0.7.8"
 lsp-types = "=0.94"
 matlab_beautifier = { git = "https://github.com/acristoffers/matlab-beautifier" }
 process_alive = "0.1.1"
-regex = "1.10.6"
-serde = "1.0.210"
-serde_json = "1.0.128"
+regex = "1.11.1"
+serde = "1.0.219"
+serde_json = "1.0.140"
 simplelog = "0.12.2"
+streaming-iterator = { version = "0.1.9", features = ["std"] }
 tree-sitter = ">=0.21.0"
 tree-sitter-matlab = { git = "https://github.com/acristoffers/tree-sitter-matlab" }
-xdg = "2.5.2"
+xdg = "3.0.0"
 
 [build-dependencies]
-clap = { version = "4.5.18", features = ["derive", "env"] }
-clap_complete = "4.5.29"
-clap_mangen = "0.2.23"
+clap = { version = "4.5.37", features = ["derive", "env"] }
+clap_complete = "4.5.48"
+clap_mangen = "0.2.26"
 fs_extra = "1.3.0"
 
 [[bin]]

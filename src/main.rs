@@ -60,7 +60,7 @@ fn main() -> ExitCode {
 }
 
 fn configure_logger() -> Result<()> {
-    let xdg_dirs = xdg::BaseDirectories::with_prefix("matlab-lsp")?;
+    let xdg_dirs = xdg::BaseDirectories::with_prefix("matlab-lsp");
     let info_log_path = xdg_dirs.place_cache_file("matlab-lsp.log")?;
     let debug_log_path = xdg_dirs.place_cache_file("matlab-lsp-debug.log")?;
     let mut open_options = OpenOptions::new();

@@ -12,11 +12,11 @@ use crate::impls::range::PosToPoint;
 use crate::types::{ParsedFile, Range, ReferenceTarget};
 use anyhow::{anyhow, Result};
 use lsp_types::{SemanticToken, SemanticTokenType};
-use tree_sitter::{Node, Query, QueryCursor};
+use tree_sitter::{Node, Query, QueryCursor, StreamingIterator};
 
 pub fn semantic_tokens(parsed_file: &Arc<ParsedFile>) -> Result<Vec<SemanticToken>> {
     let scm = include_str!("../queries/semantic.scm");
-    let query = Query::new(&tree_sitter_matlab::language(), scm)?;
+    let query = Query::new(&tree_sitter_matlab::LANGUAGE.into(), scm)?;
     let query_captures: HashMap<u32, String> = query
         .capture_names()
         .iter()
@@ -25,19 +25,18 @@ pub fn semantic_tokens(parsed_file: &Arc<ParsedFile>) -> Result<Vec<SemanticToke
     let mut cursor = QueryCursor::new();
     let tree = parsed_file.tree.clone();
     let node = tree.root_node();
-    let captures: Vec<(String, Node)> = cursor
-        .captures(&query, node, parsed_file.contents.as_bytes())
-        .map(|(c, _)| c)
-        .flat_map(|c| c.captures)
-        .flat_map(|c| -> Result<(String, Node)> {
+    let mut captures: Vec<(String, Node)> = vec![];
+    let mut xs = cursor.captures(&query, node, parsed_file.contents.as_bytes());
+    while let Some((c, _)) = xs.next() {
+        for c in c.captures {
             let capture_name = query_captures
                 .get(&c.index)
                 .ok_or(code_loc!("Not capture for index."))?
                 .clone();
             let node = c.node;
-            Ok((capture_name, node))
-        })
-        .collect();
+            captures.push((capture_name, node))
+        }
+    }
     semantic_tokens_impl(&captures, parsed_file)
 }
 

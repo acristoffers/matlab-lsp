@@ -23,7 +23,7 @@ use crossbeam_channel::{Receiver, Sender};
 use itertools::Itertools;
 use log::{debug, error, info};
 use regex::Regex;
-use tree_sitter::{Node, Point, Query, QueryCursor};
+use tree_sitter::{Node, Point, Query, QueryCursor, StreamingIterator};
 
 pub fn extract_symbols(
     sender: Sender<ThreadMessage>,
@@ -37,7 +37,7 @@ pub fn extract_symbols(
         pf_mr.load_contents()?;
     }
     let scm = include_str!("../queries/defref.scm");
-    let query = Query::new(&tree_sitter_matlab::language(), scm)?;
+    let query = Query::new(&tree_sitter_matlab::LANGUAGE.into(), scm)?;
     let query_captures: HashMap<u32, String> = query
         .capture_names()
         .iter()
@@ -46,19 +46,18 @@ pub fn extract_symbols(
     let mut cursor = QueryCursor::new();
     let tree = pf_mr.tree.clone();
     let node = tree.root_node();
-    let mut captures: Vec<(String, Node)> = cursor
-        .captures(&query, node, pf_mr.contents.as_bytes())
-        .map(|(c, _)| c)
-        .flat_map(|c| c.captures)
-        .flat_map(|c| -> Result<(String, Node)> {
+    let mut captures: Vec<(String, Node)> = vec![];
+    let mut xs = cursor.captures(&query, node, pf_mr.contents.as_bytes());
+    while let Some((c, _)) = xs.next() {
+        for c in c.captures {
             let capture_name = query_captures
                 .get(&c.index)
                 .ok_or(code_loc!("Not capture for index."))?
                 .clone();
             let node = c.node;
-            Ok((capture_name, node))
-        })
-        .collect();
+            captures.push((capture_name, node))
+        }
+    }
     captures.sort_by(|(_, n1), (_, n2)| n1.start_byte().cmp(&n2.start_byte()));
     let ws = analyze_impl(
         sender.clone(),

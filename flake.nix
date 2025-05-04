@@ -18,8 +18,8 @@
           cargoLock = {
             lockFile = ./Cargo.lock;
             outputHashes = {
-              "tree-sitter-matlab-1.0.2" = "sha256-hueZg7hoZb11+ukrZgK1+da0w9J22jsj1BexlF4USXY=";
-              "matlab_beautifier-1.0.0" = "sha256-jJJ87BKYHvgsdLSUa19Wlk1xKa5vfYY8d7HESfcS5/E=";
+              "tree-sitter-matlab-1.0.5" = "sha256-iiELNwO4m0lr2Bcowu5zj0VdA2Eg2i5N58MwC7HiGbs=";
+              "matlab_beautifier-1.0.0" = "sha256-NgGkjwO6SsevpuvQ6J17w029Pzfa1mszErcG3E42BqQ=";
             };
           };
           src = ./.;
@@ -37,7 +37,7 @@
           default = matlab-lsp;
         };
         devShell = pkgs.mkShell {
-          nativeBuildInputs = with pkgs; [ rustc cargo ];
+          nativeBuildInputs = nativeBuildInputs ++ (with pkgs; [ busybox ]);
           inherit buildInputs;
         };
       }
