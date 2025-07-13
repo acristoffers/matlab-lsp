@@ -18,8 +18,8 @@
           cargoLock = {
             lockFile = ./Cargo.lock;
             outputHashes = {
-              "tree-sitter-matlab-1.0.6" = "sha256-5SblRAJXzJSEXxiUFnM9vNiJV18sT5dt/NrOHPAix1c=";
-              "matlab_beautifier-1.0.0" = "sha256-vzrrH9iP29cWE3z32+iRbhvuxpVcagoBiC4smV0/P6g=";
+              "tree-sitter-matlab-1.0.7" = "sha256-7I6ihIWBx8PqULbPzlrlI4BkrnEf7geT5xx08WjWQWg=";
+              "matlab_beautifier-1.0.0" = "sha256-jBbkb37PMBUJpmRKxWNYQlrnqNfBPxzsTCWfYcBqsBA=";
             };
           };
           src = ./.;
