@@ -1168,7 +1168,7 @@ pub fn parent_of_kind<S: Into<String>>(kind: S, node: Node) -> Option<Node> {
     }
 }
 
-fn node_at_pos(parsed_file: &mut ParsedFile, point: Point) -> Option<Node> {
+fn node_at_pos(parsed_file: &mut ParsedFile, point: Point) -> Option<Node<'_>> {
     parsed_file
         .tree
         .root_node()
