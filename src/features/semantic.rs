@@ -28,7 +28,7 @@ pub fn semantic_tokens(parsed_file: &Arc<ParsedFile>) -> Result<Vec<SemanticToke
     let mut captures: Vec<(String, Node)> = vec![];
     let mut xs = cursor.captures(&query, node, parsed_file.contents.as_bytes());
     while let Some((c, _)) = xs.next() {
-        for c in c.captures {
+        for c in c.captures() {
             let capture_name = query_captures
                 .get(&c.index)
                 .ok_or(code_loc!("Not capture for index."))?

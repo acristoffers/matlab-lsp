@@ -49,7 +49,7 @@ pub fn extract_symbols(
     let mut captures: Vec<(String, Node)> = vec![];
     let mut xs = cursor.captures(&query, node, pf_mr.contents.as_bytes());
     while let Some((c, _)) = xs.next() {
-        for c in c.captures {
+        for c in c.captures() {
             let capture_name = query_captures
                 .get(&c.index)
                 .ok_or(code_loc!("Not capture for index."))?

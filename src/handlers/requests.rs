@@ -384,7 +384,7 @@ fn handle_folding(
         let mut xs = cursor.captures(&query, root, file.contents.as_bytes());
         let mut nodes: Vec<Node> = vec![];
         while let Some((c, _)) = xs.next() {
-            for c in c.captures {
+            for c in c.captures() {
                 nodes.push(c.node);
             }
         }
